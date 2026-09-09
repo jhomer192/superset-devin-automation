@@ -8,6 +8,7 @@
     "body": "Flushes the accumulated non-string buffer before switching to INSIDE_MULTILINE_STRING so statement text is not discarded.\n\nCloses #5",
     "state": "closed",
     "merged": true,
+    "merged_at": "2026-01-01T00:00:00Z",
     "merge_commit_sha": "1111111111111111111111111111111111111111",
     "base": {"ref": "master", "sha": "fc110d8428f35249a2092778ca0a3e26a2de0b14"},
     "head": {"ref": "devin/fix-kql-multiline", "sha": "2222222222222222222222222222222222222222"}

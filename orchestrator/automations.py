@@ -76,21 +76,31 @@ def map_payload(target_repo: str, automation_repo: str) -> dict[str, Any]:
     }
 
 
-def reduce_payload(target_repo: str, automation_repo: str) -> dict[str, Any]:
+def reduce_payload(
+    target_repo: str, automation_repo: str, verify_branch: str = "master", every_n: int = 1
+) -> dict[str, Any]:
     prompt = (
         _shim(
             automation_repo,
+            f"VERIFY_BRANCH={verify_branch} VERIFY_EVERY_N_MERGES={every_n} "
             "python -m orchestrator reduce --event-json event.json  "
             "(first write the appended pull_request event payload to event.json, unmodified)",
             "   DEVIN_API_KEY, DEVIN_ORG_ID, GITHUB_TOKEN (already in the environment as session secrets)",
         )
         + f"\nTarget repository: @{target_repo}\n"
+        + f"Cadence: the orchestrator only starts a verification session for every {every_n}th PR "
+        f"merged into `{verify_branch}`; on other merges it records the count and exits.\n"
     )
     return {
         "name": REDUCE_NAME,
         "enabled": True,
         "run_as": {"type": "organization"},
-        "metadata": {"component": "reduce", "target_repo": target_repo},
+        "metadata": {
+            "component": "reduce",
+            "target_repo": target_repo,
+            "verify_branch": verify_branch,
+            "verify_every_n_merges": str(every_n),
+        },
         "triggers": [
             {
                 "event_type": "github:pull_request",
@@ -151,12 +161,22 @@ def assert_no_ceilings(payload: dict[str, Any]) -> None:
 
 
 def register(
-    devin: DevinClient, target_repo: str, automation_repo: str, *, dry_run: bool = False
+    devin: DevinClient,
+    target_repo: str,
+    automation_repo: str,
+    *,
+    verify_branch: str = "master",
+    every_n: int = 1,
+    dry_run: bool = False,
 ) -> list[dict[str, Any]]:
     """Create MAP and REDUCE, or update them in place if automations with the same name exist."""
     results: list[dict[str, Any]] = []
     existing = {a.get("name"): a for a in devin.list_automations()} if not dry_run else {}
-    for payload in (map_payload(target_repo, automation_repo), reduce_payload(target_repo, automation_repo)):
+    payloads = (
+        map_payload(target_repo, automation_repo),
+        reduce_payload(target_repo, automation_repo, verify_branch, every_n),
+    )
+    for payload in payloads:
         errors = validate_payload(payload)
         if errors:
             raise ValueError(f"{payload['name']}: invalid payload:\n  " + "\n  ".join(errors))

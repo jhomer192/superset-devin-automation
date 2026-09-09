@@ -52,7 +52,7 @@ would be rejected for.
 ### Live
 
 ```bash
-cp .env.example .env         # fill DEVIN_API_KEY, DEVIN_ORG_ID, GITHUB_TOKEN
+cp .env.example .env         # fill DEVIN_API_KEY, DEVIN_ORG_ID, GITHUB_TOKEN, VERIFY_BRANCH, VERIFY_EVERY_N_MERGES
 docker compose run --rm orchestrator register --dry-run   # print validated payloads
 docker compose run --rm orchestrator register             # create/update both automations
 docker compose run --rm orchestrator map                  # what Friday would do, right now
@@ -95,11 +95,32 @@ Progress is an append-only comment log on the issue (`orchestrator/ledger.py`,
 
 ## How a merged PR is verified (REDUCE)
 
-`orchestrator/reduce_job.py` accepts only `closed` + `merged` events for the target repo,
-takes `merge_commit_sha` as HEAD and its first parent as BASE, resolves the issues the PR
-closes (`Closes #n` keywords) plus every issue whose fix already landed (regression guards),
-and starts one session keyed `(pr_url, merge_commit_sha)`. The ledger comment on the PR
-makes a replayed webhook a no-op.
+`orchestrator/reduce_job.py` accepts only `closed` + `merged` events for the target repo
+whose `pull_request.base.ref` is `VERIFY_BRANCH`, resolves the issues the merged PRs close
+(`Closes #n` keywords) plus every issue whose fix already landed (regression guards), and starts
+one session keyed `(pr_url, merge_commit_sha)`. The ledger comment on the PR makes a replayed
+webhook a no-op.
+
+### Cadence: every *n*th merge into a selected branch
+
+The automation trigger fires on every merged PR — the Automations API has no counter and no
+callback action — so the counter lives in code and is derived from GitHub itself rather than
+from mutable state:
+
+```
+VERIFY_BRANCH=main            # only PRs merged into this branch count (default: master)
+VERIFY_EVERY_N_MERGES=5       # verify when count % 5 == 0 (default: 1 = every merge)
+```
+
+On each event, `run_reduce` lists the PRs merged into `VERIFY_BRANCH` (`GET /pulls?state=closed&base=…`,
+ordered by `merged_at`) and takes this PR's 1-based position *k*. If `k % n != 0` it appends a
+`merge_counted` ledger comment ("merge k, verification deferred") to the PR and exits without a
+session. If `k % n == 0` it verifies the window of the last *n* merges: HEAD is this PR's
+`merge_commit_sha`, BASE is the first parent of the oldest merge in the window, and the probes
+cover every issue closed anywhere in the window. A replayed webhook finds the `merge_counted` or
+`verification_started` record and does nothing; PRs merged into other branches are skipped
+before counting. `register` bakes both values into the REDUCE prompt and metadata, so changing
+them is `VERIFY_BRANCH=… VERIFY_EVERY_N_MERGES=… orchestrator register`.
 
 The session runs `verify/run_all.sh`, which on the Devin VM:
 
@@ -175,10 +196,9 @@ CI (`.github/workflows/ci.yml`) runs the same plus `docker compose build` and a 
 
 ## Deviations from the brief
 
-* **Cadence.** Fix sessions start on Fridays; verification runs on every merged PR rather than
-  every *n* merges, because a counter across webhook deliveries would need state the
-  automation cannot hold (there is no callback action) and a batch of *n* would blur which
-  merge introduced a regression.
+* **Cadence.** Fix sessions start on Fridays; verification runs on every *n*th merge into
+  `VERIFY_BRANCH` (see above). The counter is not held by the automation — it cannot be, there is
+  no callback action — but computed from the branch's merged-PR history on each event.
 * **Regression guards.** REDUCE runs the probes for already-landed fixes too, not only the PR's
   own issue — that is what "no regressions since last time" actually requires.
 * **Issue #15** duplicates #12 (same lockfile defect, closed by PR 17). Both are deflected by

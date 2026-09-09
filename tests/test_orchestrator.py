@@ -49,6 +49,19 @@ def do_reduce(devin, gh, registry, event=None):
     )
 
 
+def run_reduce_n(devin, gh, registry, event, *, branch, n):
+    return run_reduce(
+        devin=devin,
+        gh=gh,
+        registry=registry,
+        target_repo=REPO,
+        automation_repo=AUTO,
+        event=event,
+        verify_branch=branch,
+        every_n=n,
+    )
+
+
 # --- registry ---------------------------------------------------------------------------------
 
 
@@ -218,6 +231,83 @@ def test_reduce_rejects_unmerged_and_foreign_events(registry, world):
     assert devin.sessions == {}
 
 
+def merge_event(gh, number, *, branch, sha, body=""):
+    pr = gh.merge(number, branch=branch, sha=sha, title=f"pr {number}", body=body)
+    return {"action": "closed", "number": number, "pull_request": pr, "repository": {"full_name": REPO}}
+
+
+def test_reduce_verifies_every_nth_merge_into_selected_branch(registry, world):
+    devin, gh = world
+    gh.branch_heads["main"] = "a" * 40
+    bodies = {2: "Closes #3", 4: "Closes #11", 5: ""}
+    reports = []
+    for i in range(1, 6):
+        ev = merge_event(gh, 100 + i, branch="main", sha=str(i) * 40, body=bodies.get(i, ""))
+        reports.append(run_reduce_n(devin, gh, registry, ev, branch="main", n=5))
+    assert [r.merge_index for r in reports] == [1, 2, 3, 4, 5]
+    assert all(r.session_id is None and "of 5" in r.skipped_reason for r in reports[:4])
+    fifth = reports[4]
+    assert fifth.session_id and fifth.window_prs == [101, 102, 103, 104, 105]
+    assert fifth.base_sha == "a" * 40 and fifth.merge_commit_sha == "5" * 40
+    assert fifth.closes == [3, 11]
+    assert len([s for s in devin.sessions.values() if "sda-verify" in s["tags"]]) == 1
+    # every non-triggering merge left a durable count on its own PR thread
+    for n in (101, 102, 103, 104):
+        assert find(IssueLedger(gh, REPO).read(n), "merge_counted")
+    # the 10th merge is the next trigger and its window starts after the 5th
+    for i in range(6, 11):
+        ev = merge_event(gh, 100 + i, branch="main", sha=chr(ord("a") + i) * 40)
+        r = run_reduce_n(devin, gh, registry, ev, branch="main", n=5)
+    assert r.merge_index == 10 and r.session_id and r.base_sha == "5" * 40
+    assert r.window_prs == [106, 107, 108, 109, 110]
+
+
+def test_reduce_replay_does_not_recount_and_other_branches_do_not_count(registry, world):
+    devin, gh = world
+    gh.branch_heads["main"] = "a" * 40
+    ev = merge_event(gh, 201, branch="main", sha="1" * 40)
+    first = run_reduce_n(devin, gh, registry, ev, branch="main", n=5)
+    assert first.merge_index == 1 and first.session_id is None
+    replay = run_reduce_n(devin, gh, registry, ev, branch="main", n=5)
+    assert "already counted" in replay.skipped_reason and replay.merge_index is None
+    assert len(find(IssueLedger(gh, REPO).read(201), "merge_counted")) == 1
+
+    for i in range(2, 6):
+        side = merge_event(gh, 200 + i, branch="release-4.0", sha=str(i) * 40)
+        r = run_reduce_n(devin, gh, registry, side, branch="main", n=5)
+        assert "only 'main'" in r.skipped_reason and r.merge_index is None
+    assert gh.list_merged_pulls(REPO, "main") and len(gh.list_merged_pulls(REPO, "main")) == 1
+    assert devin.sessions == {}
+
+    # the fixture PR is merged into master; with VERIFY_BRANCH=main it is ignored entirely
+    r = run_reduce_n(devin, gh, registry, load_event(), branch="main", n=1)
+    assert r.skipped_reason and r.session_id is None
+
+
+def test_verify_settings_from_environment(monkeypatch):
+    monkeypatch.delenv("VERIFY_BRANCH", raising=False)
+    monkeypatch.delenv("VERIFY_EVERY_N_MERGES", raising=False)
+    s = load_settings(simulate=True)
+    assert s.verify_branch == "master" and s.verify_every_n_merges == 1
+    monkeypatch.setenv("VERIFY_BRANCH", "main")
+    monkeypatch.setenv("VERIFY_EVERY_N_MERGES", "5")
+    s = load_settings(simulate=True)
+    assert s.verify_branch == "main" and s.verify_every_n_merges == 5
+    monkeypatch.setenv("VERIFY_EVERY_N_MERGES", "0")
+    with pytest.raises(SystemExit):
+        load_settings(simulate=True)
+
+
+def test_reduce_automation_prompt_carries_cadence():
+    payload = automations.reduce_payload(REPO, AUTO, "main", 5)
+    prompt = payload["actions"][0]["prompt"]
+    assert "VERIFY_BRANCH=main VERIFY_EVERY_N_MERGES=5" in prompt
+    assert payload["metadata"]["verify_branch"] == "main"
+    assert automations.validate_payload(payload) == []
+    # the trigger itself is unchanged: it still fires on every merged PR, the counter is in code
+    assert payload["triggers"] == automations.reduce_payload(REPO, AUTO)["triggers"]
+
+
 def test_reduce_adds_regression_guards_for_landed_fixes(registry, world):
     devin, gh = world
     gh.close_completed(7)
@@ -383,6 +473,19 @@ def test_simulate_runs_end_to_end(registry):
     assert out["merge_reduce_replay_is_deduplicated"]["skipped_reason"]
     assert out["verification_structured_output"]["acceptance_met"] is True
     assert out["metrics"]["triage_deflections"] == 2
+    assert out["metrics"]["sessions_with_merged_pr"] == 1
+
+
+def test_simulate_every_fifth_merge(registry, monkeypatch):
+    monkeypatch.setenv("VERIFY_BRANCH", "master")
+    monkeypatch.setenv("VERIFY_EVERY_N_MERGES", "5")
+    out = cmd_simulate(load_settings(simulate=True), registry)
+    counted = out["merges_counted_not_verified"]
+    assert [c["merge_index"] for c in counted] == [1, 2, 3, 4]
+    assert all("of 5" in c["reason"] for c in counted)
+    assert out["merge_reduce"]["merge_index"] == 5 and out["merge_reduce"]["session_id"]
+    assert out["merge_reduce"]["base_sha"] == "fc110d8428f35249a2092778ca0a3e26a2de0b14"
+    assert out["merge_reduce"]["closes"] == [5]
     assert out["metrics"]["sessions_with_merged_pr"] == 1
 
 

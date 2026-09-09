@@ -2,6 +2,12 @@
 
 The ledger for a PR is its own comment thread (PRs are issues to the GitHub API), so the
 idempotency record survives orchestrator restarts and is visible to reviewers.
+
+Cadence: only PRs merged into `verify_branch` count. The trigger fires on every merge (the
+Automations API has no counter), so the counter is derived from GitHub itself: this PR's
+position k among all PRs ever merged into the branch. When k % every_n != 0 the run records
+"merge k, deferred" on the PR and exits; otherwise it verifies the window of the last `every_n`
+merges, with BASE = the first parent of the oldest merge in the window.
 """
 
 from __future__ import annotations
@@ -36,6 +42,8 @@ class ReduceReport:
     regression_issues: list[int] = field(default_factory=list)
     session_id: str | None = None
     skipped_reason: str | None = None
+    merge_index: int | None = None
+    window_prs: list[int] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return self.__dict__.copy()
@@ -53,6 +61,17 @@ def extract_merged_pr(event: dict[str, Any]) -> dict[str, Any]:
 
 def dedup_key(pr_url: str, merge_commit_sha: str) -> str:
     return f"{pr_url}@{merge_commit_sha}"
+
+
+def merge_window(merged: list[dict[str, Any]], number: int, every_n: int) -> tuple[int, list[dict[str, Any]]]:
+    """(1-based position of PR `number` among merges, PRs in its window; [] when k % n != 0)."""
+    numbers = [int(p["number"]) for p in merged]
+    if number not in numbers:
+        raise NotAMergedPR(f"PR #{number} is not among the PRs merged into the branch")
+    k = numbers.index(number) + 1
+    if k % every_n != 0:
+        return k, []
+    return k, merged[k - every_n : k]
 
 
 def regression_issue_numbers(
@@ -77,6 +96,8 @@ def run_reduce(
     target_repo: str,
     automation_repo: str,
     event: dict[str, Any],
+    verify_branch: str = "master",
+    every_n: int = 1,
 ) -> ReduceReport:
     pr = extract_merged_pr(event)
     pr_url = str(pr["html_url"])
@@ -88,10 +109,17 @@ def run_reduce(
     if repo_full.lower() != target_repo.lower():
         report.skipped_reason = f"event is for {repo_full}, not {target_repo}"
         return report
+    base_ref = str((pr.get("base") or {}).get("ref") or "")
+    if base_ref != verify_branch:
+        report.skipped_reason = f"PR merged into {base_ref!r}; only {verify_branch!r} is verified"
+        return report
 
     ledger = IssueLedger(gh, target_repo)
     entries = ledger.read(number)
     key = dedup_key(pr_url, head_sha)
+    if find(entries, "merge_counted", key=key):
+        report.skipped_reason = f"merge already counted for {key}"
+        return report
     for entry in reversed(find(entries, "verification_started", key=key)):
         session_id = str(entry.data.get("session_id", ""))
         session = devin.get_session(session_id) if session_id else {}
@@ -104,11 +132,32 @@ def run_reduce(
             report.session_id = session_id
             return report
 
-    parents = gh.get_commit_parents(target_repo, head_sha)
-    base_sha = parents[0] if parents else str((pr.get("base") or {}).get("sha") or "")
+    merged = gh.list_merged_pulls(target_repo, verify_branch)
+    k, window = merge_window(merged, number, every_n)
+    report.merge_index = k
+    if not window:
+        report.skipped_reason = (
+            f"merge {k} into {verify_branch}: {k % every_n} of {every_n} since last verification"
+        )
+        ledger.append(
+            number,
+            "Merge counted, verification deferred",
+            LedgerEntry("merge_counted", data={"key": key, "merge_index": k, "every_n": every_n}),
+            [f"merge #{k} into `{verify_branch}`; verification runs every {every_n} merges"],
+        )
+        log.info("REDUCE: %s counted (%d %% %d != 0), no session", key, k, every_n)
+        return report
+    report.window_prs = [int(p["number"]) for p in window]
+
+    oldest = window[0]
+    parents = gh.get_commit_parents(target_repo, str(oldest["merge_commit_sha"]))
+    base_sha = parents[0] if parents else str((oldest.get("base") or {}).get("sha") or "")
     report.base_sha = base_sha or None
 
-    closes = closing_issue_numbers(f"{pr.get('title', '')}\n{pr.get('body', '')}", target_repo)
+    closes: list[int] = []
+    for wpr in window:
+        text = f"{wpr.get('title', '')}\n{wpr.get('body', '')}"
+        closes.extend(n for n in closing_issue_numbers(text, target_repo) if n not in closes)
     report.closes = closes
     regression = regression_issue_numbers(gh, registry, target_repo, set(closes))
     report.regression_issues = regression
@@ -134,8 +183,8 @@ def run_reduce(
     session = devin.create_session(
         {
             "prompt": prompt,
-            "title": f"Verify {target_repo} PR #{number} @ {head_sha[:10]}",
-            "tags": [VERIFY_TAG, f"pr-{number}"],
+            "title": f"Verify {target_repo} {verify_branch} @ {head_sha[:10]} (merge {k})",
+            "tags": [VERIFY_TAG] + [f"pr-{p}" for p in report.window_prs],
             "structured_output_schema": VERIFICATION_SCHEMA,
             "structured_output_required": True,
             "resumable": True,
@@ -153,6 +202,8 @@ def run_reduce(
         [
             f"session: `{session_id}`" + (f" ({session['url']})" if session.get("url") else ""),
             f"head `{head_sha}` vs base `{base_sha}`",
+            f"window: merges {k - every_n + 1}..{k} into `{verify_branch}` "
+            f"({', '.join(f'#{p}' for p in report.window_prs)})",
             f"closes: {', '.join(f'#{n}' for n in closes) or 'none'}",
             f"regression guards: {', '.join(f'#{n}' for n in regression) or 'none'}",
         ],

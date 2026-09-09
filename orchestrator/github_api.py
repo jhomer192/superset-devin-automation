@@ -36,6 +36,12 @@ def closing_issue_numbers(text: str | None, repo: str) -> list[int]:
     return found
 
 
+def merged_in_order(pulls: list[JSON]) -> list[JSON]:
+    """Keep only merged PRs, ordered by merged_at then number (GitHub sorts closed PRs arbitrarily)."""
+    merged = [p for p in pulls if p.get("merged_at")]
+    return sorted(merged, key=lambda p: (str(p["merged_at"]), int(p["number"])))
+
+
 class GitHubClient(Protocol):
     def list_issues(self, repo: str, labels: str, state: str = "open") -> list[JSON]: ...
 
@@ -48,6 +54,10 @@ class GitHubClient(Protocol):
     def list_pulls(self, repo: str, state: str = "open") -> list[JSON]: ...
 
     def get_pull(self, repo: str, number: int) -> JSON: ...
+
+    def list_merged_pulls(self, repo: str, base_branch: str) -> list[JSON]:
+        """Every PR merged into base_branch, oldest merge first."""
+        ...
 
     def get_branch_sha(self, repo: str, branch: str) -> str: ...
 
@@ -105,6 +115,10 @@ class LiveGitHubClient:
     def get_pull(self, repo: str, number: int) -> JSON:
         result: JSON = self._get(f"/repos/{repo}/pulls/{number}")
         return result
+
+    def list_merged_pulls(self, repo: str, base_branch: str) -> list[JSON]:
+        closed = self._paged(f"/repos/{repo}/pulls", {"state": "closed", "base": base_branch})
+        return merged_in_order(closed)
 
     def get_branch_sha(self, repo: str, branch: str) -> str:
         data = self._get(f"/repos/{repo}/branches/{branch}")

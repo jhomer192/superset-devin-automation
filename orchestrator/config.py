@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
+
+# Organisation id is an identifier, not a credential; the automations are registered in it.
+DEFAULT_ORG_ID = "org-cd02d46007034cdbaad11ff0d2392fac"
 
 
 @dataclass(frozen=True)
@@ -15,6 +19,8 @@ class Settings:
     target_repo: str
     automation_repo: str
     ready_label: str
+    verify_branch: str
+    verify_every_n_merges: int
     simulate: bool
     log_level: str
 
@@ -44,16 +50,29 @@ class Settings:
             )
 
 
+def _first(env: Mapping[str, str], *names: str) -> str:
+    for name in names:
+        if env.get(name):
+            return env[name]
+    return ""
+
+
 def load_settings(simulate: bool = False) -> Settings:
     env = os.environ
+    every = int(env.get("VERIFY_EVERY_N_MERGES", "1") or 1)
+    if every < 1:
+        raise SystemExit("VERIFY_EVERY_N_MERGES must be >= 1")
     return Settings(
         devin_api_base=env.get("DEVIN_API_BASE", "https://api.devin.ai").rstrip("/"),
-        devin_api_key=env.get("DEVIN_API_KEY", ""),
-        devin_org_id=env.get("DEVIN_ORG_ID", ""),
-        github_token=env.get("GITHUB_TOKEN", ""),
+        # the second names are the Devin secret names this loop is provisioned with
+        devin_api_key=_first(env, "DEVIN_API_KEY", "superset_remediation_bot"),
+        devin_org_id=env.get("DEVIN_ORG_ID", "") or DEFAULT_ORG_ID,
+        github_token=_first(env, "GITHUB_TOKEN", "superset_github_key"),
         target_repo=env.get("TARGET_REPO", "jhomer192/superset"),
         automation_repo=env.get("AUTOMATION_REPO", "jhomer192/superset-devin-automation"),
         ready_label=env.get("READY_LABEL", "ready"),
+        verify_branch=env.get("VERIFY_BRANCH", "master"),
+        verify_every_n_merges=every,
         simulate=simulate or env.get("SIMULATE", "").lower() in {"1", "true", "yes"},
         log_level=env.get("LOG_LEVEL", "INFO"),
     )

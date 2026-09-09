@@ -49,11 +49,16 @@ def cmd_map(settings: Settings, devin: DevinClient, gh: GitHubClient, registry: 
 
 
 def cmd_reduce(
-    settings: Settings, devin: DevinClient, gh: GitHubClient, registry: Registry, event_json: Path | None
+    settings: Settings,
+    devin: DevinClient,
+    gh: GitHubClient,
+    registry: Registry,
+    event_json: Path | None,
+    event: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if event_json is None and not settings.simulate:
+    if event_json is None and event is None and not settings.simulate:
         raise SystemExit("reduce requires --event-json <path> unless --simulate")
-    event = load_event(event_json)
+    event = event if event is not None else load_event(event_json)
     return run_reduce(
         devin=devin,
         gh=gh,
@@ -61,6 +66,8 @@ def cmd_reduce(
         target_repo=settings.target_repo,
         automation_repo=settings.automation_repo,
         event=event,
+        verify_branch=settings.verify_branch,
+        every_n=settings.verify_every_n_merges,
     ).as_dict()
 
 
@@ -73,7 +80,14 @@ def cmd_metrics(
 
 
 def cmd_register(settings: Settings, devin: DevinClient, dry_run: bool) -> list[dict[str, Any]]:
-    return automations.register(devin, settings.target_repo, settings.automation_repo, dry_run=dry_run)
+    return automations.register(
+        devin,
+        settings.target_repo,
+        settings.automation_repo,
+        verify_branch=settings.verify_branch,
+        every_n=settings.verify_every_n_merges,
+        dry_run=dry_run,
+    )
 
 
 def cmd_simulate(settings: Settings, registry: Registry) -> dict[str, Any]:
@@ -105,8 +119,26 @@ def cmd_simulate(settings: Settings, registry: Registry) -> dict[str, Any]:
         else:
             devin.suspend(sid, "waiting_for_user")
 
-    out["merge_reduce"] = cmd_reduce(settings, devin, gh, registry, None)
-    out["merge_reduce_replay_is_deduplicated"] = cmd_reduce(settings, devin, gh, registry, None)
+    # Cadence: with VERIFY_EVERY_N_MERGES=n, the n-1 merges before the fix are counted, not verified.
+    branch = settings.verify_branch
+    n = settings.verify_every_n_merges
+    gh.pulls.pop(int(pr["number"]))
+    gh.branch_heads[branch] = pr["base"]["sha"]
+    out["merges_counted_not_verified"] = []
+    for i in range(1, n):
+        filler = gh.merge(900 + i, branch=branch, sha=f"{i:040x}", title=f"chore: unrelated merge {i}")
+        filler_event = {**event, "number": filler["number"], "pull_request": filler}
+        result = cmd_reduce(settings, devin, gh, registry, None, event=filler_event)
+        out["merges_counted_not_verified"].append(
+            {"pr": filler["number"], "merge_index": result["merge_index"], "reason": result["skipped_reason"]}
+        )
+    event["pull_request"] = gh.merge(
+        int(pr["number"]), branch=branch, sha=pr["merge_commit_sha"], title=pr["title"], body=pr["body"]
+    )
+    event["pull_request"]["html_url"] = pr["html_url"]
+
+    out["merge_reduce"] = cmd_reduce(settings, devin, gh, registry, None, event=event)
+    out["merge_reduce_replay_is_deduplicated"] = cmd_reduce(settings, devin, gh, registry, None, event=event)
     verify_sid = out["merge_reduce"]["session_id"]
     devin.advance(verify_sid, outcome="ok", acus=6.1)
     out["verification_structured_output"] = devin.get_session(verify_sid)["structured_output"]

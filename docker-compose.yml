@@ -11,6 +11,8 @@ services:
       TARGET_REPO: ${TARGET_REPO:-jhomer192/superset}
       AUTOMATION_REPO: ${AUTOMATION_REPO:-jhomer192/superset-devin-automation}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      VERIFY_BRANCH: ${VERIFY_BRANCH:-master}
+      VERIFY_EVERY_N_MERGES: ${VERIFY_EVERY_N_MERGES:-1}
     volumes:
       - ./events:/events:ro
     command: ["simulate"]

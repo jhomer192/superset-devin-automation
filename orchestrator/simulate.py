@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .github_api import merged_in_order
 from .schema import validate
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -181,8 +182,27 @@ class FakeGitHub:
         pr = event["pull_request"]
         gh.pulls[int(pr["number"])] = pr
         gh.parents[pr["merge_commit_sha"]] = [pr["base"]["sha"]]
-        gh.branch_heads["master"] = pr["merge_commit_sha"]
+        gh.branch_heads[pr["base"]["ref"]] = pr["merge_commit_sha"]
         return gh
+
+    def merge(self, number: int, *, branch: str, sha: str, title: str = "", body: str = "") -> JSON:
+        """Record PR `number` as merged into `branch`, on top of the current branch head."""
+        self._n += 1
+        pr = {
+            "number": number,
+            "html_url": f"https://github.com/jhomer192/superset/pull/{number}",
+            "title": title,
+            "body": body,
+            "state": "closed",
+            "merged": True,
+            "merged_at": f"2026-01-01T00:00:{self._n:02d}Z",
+            "merge_commit_sha": sha,
+            "base": {"ref": branch, "sha": self.branch_heads.get(branch, "")},
+        }
+        self.parents[sha] = [self.branch_heads[branch]] if branch in self.branch_heads else []
+        self.branch_heads[branch] = sha
+        self.pulls[number] = pr
+        return dict(pr)
 
     def list_issues(self, repo: str, labels: str, state: str = "open") -> list[JSON]:
         wanted = {lbl.strip() for lbl in labels.split(",") if lbl.strip()}
@@ -210,6 +230,11 @@ class FakeGitHub:
 
     def get_pull(self, repo: str, number: int) -> JSON:
         return dict(self.pulls[number])
+
+    def list_merged_pulls(self, repo: str, base_branch: str) -> list[JSON]:
+        return merged_in_order(
+            [dict(p) for p in self.pulls.values() if (p.get("base") or {}).get("ref") == base_branch]
+        )
 
     def get_branch_sha(self, repo: str, branch: str) -> str:
         return self.branch_heads[branch]
