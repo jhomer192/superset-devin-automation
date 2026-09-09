@@ -32,7 +32,7 @@ from urllib.parse import quote
 import prison
 from flask import Flask, Response, request
 
-from superset.views.custom_tags_api_mixin import CustomTagsApiMixin
+from superset.views.custom_tags_api_mixin import CustomTagsOptimizationMixin
 
 
 class _Capture:
@@ -43,7 +43,7 @@ class _Capture:
         return Response("ok")
 
 
-class _Probe(CustomTagsApiMixin, _Capture):
+class _Probe(CustomTagsOptimizationMixin, _Capture):
     _custom_tags_only = True
 
 
