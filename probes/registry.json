@@ -1,0 +1,265 @@
+{
+  "repo": "jhomer192/superset",
+  "baseline_sha": "fc110d8428f35249a2092778ca0a3e26a2de0b14",
+  "issues": [
+    {
+      "number": 1,
+      "title": "Documented \"SameSite=None requires Secure=True\" cookie invariant is not enforced at startup",
+      "category": "security",
+      "labels": [
+        "ready",
+        "security"
+      ],
+      "state": "open",
+      "condition": "superset/initialization/__init__.py:1131 has check_websocket_secret and no cookie check; superset/config.py:2853-2854 ship SESSION_COOKIE_SECURE=False, SESSION_COOKIE_SAMESITE=\"Lax\" with no validation of the SameSite=None/Secure pair",
+      "probes": [
+        {
+          "id": "issue_1/unit",
+          "kind": "offline_pytest",
+          "script": "probes/issue_1/probe_unit.sh"
+        },
+        {
+          "id": "issue_1/startup_log",
+          "kind": "log_assertion",
+          "script": "probes/issue_1/probe_startup_log.sh"
+        }
+      ],
+      "closing_pr": "https://github.com/jhomer192/superset/pull/13",
+      "closing_pr_state": "open"
+    },
+    {
+      "number": 2,
+      "title": "extract_errors: OceanBase CONNECTION_UNKNOWN_DATABASE mapping is untested",
+      "category": "code-quality",
+      "labels": [
+        "code-quality"
+      ],
+      "state": "closed",
+      "state_reason": "not_planned",
+      "condition": "superset/db_engine_specs/oceanbase.py:39 (CONNECTION_UNKNOWN_DATABASE_REGEX) and :190-192 (error map entry) have no extract_errors test",
+      "probes": [],
+      "not_planned_reason": "Test-only request with no defect behind it: the mapping already behaves correctly, and the gap is what coverage tooling reports for free. Trivia, not a remediation (maintainer comment on #2).",
+      "closing_pr": null
+    },
+    {
+      "number": 3,
+      "title": "Streaming export chunk size hard-coded in two places (charts + SQL Lab)",
+      "category": "code-quality",
+      "labels": [
+        "ready",
+        "code-quality"
+      ],
+      "state": "open",
+      "condition": "superset/charts/data/api.py:802-803 and superset/sqllab/api.py:437-438 both hard-code chunk_size = 1024 under a TODO; superset/commands/streaming_export/base.py:74 defaults to 1000",
+      "probes": [
+        {
+          "id": "issue_3/unit",
+          "kind": "offline_pytest",
+          "script": "probes/issue_3/probe_unit.sh"
+        }
+      ],
+      "closing_pr": "https://github.com/jhomer192/superset/pull/16",
+      "closing_pr_state": "open"
+    },
+    {
+      "number": 4,
+      "title": "js-yaml resolves below 4.3.2 (GHSA-2883-xcg3-v3hh / CVE-2026-84375, HIGH)",
+      "category": "dependency",
+      "labels": [
+        "dependency"
+      ],
+      "state": "closed",
+      "state_reason": "not_planned",
+      "condition": "superset-frontend/package-lock.json:19797, :31750, :38825, :42497 resolve js-yaml 4.3.1",
+      "probes": [
+        {
+          "id": "issue_4/lockfile",
+          "kind": "offline_static",
+          "script": "probes/issue_4/probe_lockfile.sh"
+        }
+      ],
+      "not_planned_reason": "The stylelint attribution that made this look like more than a lockfile refresh was wrong (package-lock.json:42397 is inside stylelint's nested cosmiconfig, which the existing top-level cosmiconfig override already covers). All four resolutions arrive through caret ranges that admit 4.3.2, so it is a refresh with no judgment required (maintainer comment on #4). The lockfile probe is kept so a refresh can still be verified.",
+      "closing_pr": null
+    },
+    {
+      "number": 5,
+      "title": "KQL splitter drops all text before a triple-backtick string, merging or destroying statements",
+      "category": "correctness",
+      "labels": [
+        "ready",
+        "correctness"
+      ],
+      "state": "open",
+      "condition": "superset/sql/parse.py:1795-1797 (tokenize_kql) sets buffer = \"```\" on entering INSIDE_MULTILINE_STRING instead of flushing the accumulated prefix",
+      "probes": [
+        {
+          "id": "issue_5/unit",
+          "kind": "offline_pytest",
+          "script": "probes/issue_5/probe_unit.sh"
+        }
+      ],
+      "closing_pr": "https://github.com/jhomer192/superset/pull/14",
+      "closing_pr_state": "open"
+    },
+    {
+      "number": 6,
+      "title": "\"end of this quarter\" raises ValueError in the freeform date parser",
+      "category": "correctness",
+      "labels": [
+        "correctness"
+      ],
+      "state": "closed",
+      "state_reason": "not_planned",
+      "condition": "superset/utils/date_parser.py:311-313 (handle_end_of) emits LASTDAY(<date>, quarter); the LASTDAY grammar at :944 accepts only YEAR | MONTH | WEEK and EvalLastDayFunc.eval at :829-847 has no quarter branch",
+      "probes": [
+        {
+          "id": "issue_6/unit",
+          "kind": "offline_pytest",
+          "script": "probes/issue_6/probe_unit.sh"
+        }
+      ],
+      "not_planned_reason": "The issue's transcript quoted an exception string pyparsing does not emit, so an issue claiming executed evidence contained output the code never produced; and on severity it fails loudly, whereas #5 corrupts silently, so it was ranked below #5 (maintainer comment on #6). The defect itself is real; the probe is kept in case it is reopened.",
+      "closing_pr": null
+    },
+    {
+      "number": 7,
+      "title": "Custom-tags mixin's substring rewrite of the rison `q` corrupts filter values and is not idempotent",
+      "category": "correctness",
+      "labels": [
+        "ready",
+        "correctness"
+      ],
+      "state": "open",
+      "condition": "superset/views/custom_tags_api_mixin.py:86-103 (get_list) rewrites the rison q with str.replace on tags.id / tags.name / tags.type",
+      "probes": [
+        {
+          "id": "issue_7/unit",
+          "kind": "offline_pytest",
+          "script": "probes/issue_7/probe_unit.sh"
+        }
+      ],
+      "closing_pr": "https://github.com/jhomer192/superset/pull/21",
+      "closing_pr_state": "open"
+    },
+    {
+      "number": 8,
+      "title": "WebSocket JWT cookie not Secure / SameSite None",
+      "category": "security",
+      "labels": [
+        "security"
+      ],
+      "state": "closed",
+      "state_reason": "not_planned",
+      "condition": "superset/config.py:3013-3014 ship WEBSOCKET_JWT_COOKIE_SECURE = False and WEBSOCKET_JWT_COOKIE_SAMESITE = None; superset/websocket/channel.py:225-234 passes both to set_cookie",
+      "probes": [],
+      "not_planned_reason": "Proposed flipping defaults, which contradicts #1's decision (upstream reverted the equivalent SESSION_COOKIE_SECURE flip in apache/superset#26005 after #24579). Stock exposure is zero because WEBSOCKET_ENABLE defaults to False. The valid half, rejecting SameSite=None with Secure=False, is folded into #1's startup validator gated on WEBSOCKET_ENABLE (maintainer comment on #8). Covered by issue_1/unit.",
+      "closing_pr": null
+    },
+    {
+      "number": 9,
+      "title": "sanitize_svg_content regex denylist is non-idempotent and reassembles the javascript: payload it removes",
+      "category": "security",
+      "labels": [
+        "ready",
+        "security"
+      ],
+      "state": "open",
+      "condition": "superset/utils/core.py:613-659 (sanitize_svg_content) is a regex denylist: :644 literal javascript: sub, :648 \\bon\\w+\\s*= handler regex, :651-656 iframe/object removal requiring closing tags; sole caller superset/themes/utils.py:178; sink superset/templates/superset/spa.html:150",
+      "probes": [
+        {
+          "id": "issue_9/unit",
+          "kind": "offline_pytest",
+          "script": "probes/issue_9/probe_unit.sh"
+        },
+        {
+          "id": "issue_9/live_theme_api",
+          "kind": "live_http",
+          "script": "probes/issue_9/probe_live_theme_api.sh"
+        }
+      ],
+      "closing_pr": "https://github.com/jhomer192/superset/pull/18",
+      "closing_pr_state": "open"
+    },
+    {
+      "number": 10,
+      "title": "machine_auth priming page is never closed; upstream reports the leaked page can clobber the injected session cookie (apache/superset#44005)",
+      "category": "correctness",
+      "labels": [
+        "ready",
+        "correctness"
+      ],
+      "state": "open",
+      "condition": "superset/utils/machine_auth.py:64-66 (authenticate_browser_context) opens browser_context.new_page() and never calls close(); add_cookies runs at :70-83 with the page still live",
+      "probes": [
+        {
+          "id": "issue_10/integration",
+          "kind": "integration",
+          "script": "probes/issue_10/probe_integration.sh"
+        }
+      ],
+      "closing_pr": "https://github.com/jhomer192/superset/pull/19",
+      "closing_pr_state": "open"
+    },
+    {
+      "number": 11,
+      "title": "versioning/diff.py drops and fabricates chart-history records when two adhoc filters share a column",
+      "category": "correctness",
+      "labels": [
+        "ready",
+        "correctness"
+      ],
+      "state": "open",
+      "condition": "superset/versioning/diff.py:425-430 (_diff_list_by_natural_key) indexes from_list/to_list by key with no collision handling; _filter_key at :481-490 keys adhoc filters by subject alone",
+      "probes": [
+        {
+          "id": "issue_11/unit",
+          "kind": "offline_pytest",
+          "script": "probes/issue_11/probe_unit.sh"
+        }
+      ],
+      "closing_pr": "https://github.com/jhomer192/superset/pull/20",
+      "closing_pr_state": "open"
+    },
+    {
+      "number": 12,
+      "title": "nx pins brace-expansion 5.0.8 (GHSA-rgw5-rvv9-x895); the minimatch override has the wrong parent and a stale floor",
+      "category": "dependency",
+      "labels": [
+        "ready",
+        "dependency"
+      ],
+      "state": "open",
+      "condition": "superset-frontend/package-lock.json node_modules/nx/node_modules/brace-expansion resolves 5.0.8 via nx@23.1.1's exact pin; superset-frontend/package.json:424-426 override minimatch@>=10 -> brace-expansion >=5.0.8 has the wrong parent and admits the vulnerable version",
+      "probes": [
+        {
+          "id": "issue_12/lockfile",
+          "kind": "offline_static",
+          "script": "probes/issue_12/probe_lockfile.sh"
+        }
+      ],
+      "triage_note": "Both parts are mechanical (npm update nx --package-lock-only plus a one-line override edit). Dependabot is disabled on this fork, so MAP records the issue as deferred instead of starting a session; the probe still verifies a human-landed refresh.",
+      "closing_pr": null
+    },
+    {
+      "number": 15,
+      "title": "nx pins brace-expansion 5.0.8 (GHSA-rgw5-rvv9-x895); the minimatch override has the wrong parent and a stale floor",
+      "category": "dependency",
+      "labels": [
+        "ready",
+        "dependency"
+      ],
+      "state": "open",
+      "condition": "Duplicate of #12: superset-frontend/package-lock.json node_modules/nx/node_modules/brace-expansion resolves 5.0.8 via nx@23.1.1's exact pin; superset-frontend/package.json:424-426 minimatch@>=10 override has the wrong parent and a >=5.0.8 floor",
+      "probes": [
+        {
+          "id": "issue_12/lockfile",
+          "kind": "offline_static",
+          "script": "probes/issue_12/probe_lockfile.sh"
+        }
+      ],
+      "closing_pr": "https://github.com/jhomer192/superset/pull/17",
+      "closing_pr_state": "open",
+      "triage_note": "Same defect as #12; PR 17 says `Closes #15`, so REDUCE keys the lockfile probe off #15 while MAP deflects both as dependency refreshes."
+    }
+  ]
+}

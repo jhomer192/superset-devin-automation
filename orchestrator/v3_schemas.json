@@ -1,0 +1,1544 @@
+{
+ "info_version": "3.0.0",
+ "schemas": {
+  "AutomationComparisonCondition": {
+   "additionalProperties": false,
+   "properties": {
+    "field": {
+     "title": "Field",
+     "type": "string"
+    },
+    "operator": {
+     "enum": [
+      "eq",
+      "neq"
+     ],
+     "title": "Operator",
+     "type": "string"
+    },
+    "value": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "integer"
+      },
+      {
+       "type": "number"
+      },
+      {
+       "type": "boolean"
+      }
+     ],
+     "title": "Value"
+    }
+   },
+   "required": [
+    "field",
+    "operator",
+    "value"
+   ],
+   "title": "AutomationComparisonCondition",
+   "type": "object"
+  },
+  "AutomationConcurrency": {
+   "additionalProperties": false,
+   "properties": {
+    "max_concurrent_runs": {
+     "anyOf": [
+      {
+       "minimum": 1.0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Maximum in-flight runs for this automation; further triggered events wait in its queue. A run stops counting toward the limit once its session finishes and is awaiting further instructions, not only when the session stops. null = unlimited.",
+     "title": "Max Concurrent Runs"
+    },
+    "max_queue_depth": {
+     "anyOf": [
+      {
+       "minimum": 0.0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Maximum triggered events waiting in the automation's queue to run; events beyond this are dropped. Requires max_concurrent_runs to be set. null = unlimited.",
+     "title": "Max Queue Depth"
+    }
+   },
+   "title": "AutomationConcurrency",
+   "type": "object"
+  },
+  "AutomationConditionGroup": {
+   "additionalProperties": false,
+   "properties": {
+    "all": {
+     "description": "AND: every condition in the group must match.",
+     "items": {
+      "discriminator": {
+       "mapping": {
+        "between": "#/components/schemas/AutomationRangeCondition",
+        "contains": "#/components/schemas/AutomationStringCondition",
+        "ends_with": "#/components/schemas/AutomationStringCondition",
+        "eq": "#/components/schemas/AutomationComparisonCondition",
+        "globs": "#/components/schemas/AutomationGlobCondition",
+        "gt": "#/components/schemas/AutomationNumericCondition",
+        "gte": "#/components/schemas/AutomationNumericCondition",
+        "in": "#/components/schemas/AutomationListCondition",
+        "is_empty": "#/components/schemas/AutomationEmptyCondition",
+        "is_not_empty": "#/components/schemas/AutomationEmptyCondition",
+        "lt": "#/components/schemas/AutomationNumericCondition",
+        "lte": "#/components/schemas/AutomationNumericCondition",
+        "matches": "#/components/schemas/AutomationMatchCondition",
+        "neq": "#/components/schemas/AutomationComparisonCondition",
+        "not_contains": "#/components/schemas/AutomationStringCondition",
+        "not_ends_with": "#/components/schemas/AutomationStringCondition",
+        "not_globs": "#/components/schemas/AutomationGlobCondition",
+        "not_in": "#/components/schemas/AutomationListCondition",
+        "not_matches": "#/components/schemas/AutomationMatchCondition",
+        "not_starts_with": "#/components/schemas/AutomationStringCondition",
+        "recurrence": "#/components/schemas/AutomationRecurrenceCondition",
+        "starts_with": "#/components/schemas/AutomationStringCondition"
+       },
+       "propertyName": "operator"
+      },
+      "oneOf": [
+       {
+        "$ref": "#/components/schemas/AutomationComparisonCondition"
+       },
+       {
+        "$ref": "#/components/schemas/AutomationStringCondition"
+       },
+       {
+        "$ref": "#/components/schemas/AutomationNumericCondition"
+       },
+       {
+        "$ref": "#/components/schemas/AutomationEmptyCondition"
+       },
+       {
+        "$ref": "#/components/schemas/AutomationRangeCondition"
+       },
+       {
+        "$ref": "#/components/schemas/AutomationListCondition"
+       },
+       {
+        "$ref": "#/components/schemas/AutomationMatchCondition"
+       },
+       {
+        "$ref": "#/components/schemas/AutomationRecurrenceCondition"
+       },
+       {
+        "$ref": "#/components/schemas/AutomationGlobCondition"
+       }
+      ]
+     },
+     "title": "All",
+     "type": "array"
+    }
+   },
+   "required": [
+    "all"
+   ],
+   "title": "AutomationConditionGroup",
+   "type": "object"
+  },
+  "AutomationConditions-Input": {
+   "additionalProperties": false,
+   "properties": {
+    "any": {
+     "description": "OR of AND-groups (fixed two-level DNF).",
+     "items": {
+      "$ref": "#/components/schemas/AutomationConditionGroup"
+     },
+     "title": "Any",
+     "type": "array"
+    }
+   },
+   "required": [
+    "any"
+   ],
+   "title": "AutomationConditions",
+   "type": "object"
+  },
+  "AutomationCreateRequest": {
+   "additionalProperties": false,
+   "properties": {
+    "actions": {
+     "description": "Non-empty. Caps: at most one start_session; monitor_session must be the only action.",
+     "items": {
+      "discriminator": {
+       "mapping": {
+        "message_session": "#/components/schemas/AutomationMessageSessionAction",
+        "monitor_session": "#/components/schemas/AutomationMonitorSessionAction",
+        "start_session": "#/components/schemas/AutomationStartSessionAction-Input"
+       },
+       "propertyName": "type"
+      },
+      "oneOf": [
+       {
+        "$ref": "#/components/schemas/AutomationStartSessionAction-Input"
+       },
+       {
+        "$ref": "#/components/schemas/AutomationMessageSessionAction"
+       },
+       {
+        "$ref": "#/components/schemas/AutomationMonitorSessionAction"
+       }
+      ]
+     },
+     "title": "Actions",
+     "type": "array"
+    },
+    "concurrency": {
+     "anyOf": [
+      {
+       "$ref": "#/components/schemas/AutomationConcurrency"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "enabled": {
+     "default": true,
+     "title": "Enabled",
+     "type": "boolean"
+    },
+    "limits": {
+     "anyOf": [
+      {
+       "$ref": "#/components/schemas/AutomationLimits"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "metadata": {
+     "additionalProperties": {
+      "type": "string"
+     },
+     "default": {},
+     "description": "Org-visible key/value labels for organizing/filtering automations. At most 16 pairs; keys at most 32 chars; values at most 128.",
+     "title": "Metadata",
+     "type": "object"
+    },
+    "name": {
+     "maxLength": 500,
+     "minLength": 1,
+     "title": "Name",
+     "type": "string"
+    },
+    "notifications": {
+     "anyOf": [
+      {
+       "$ref": "#/components/schemas/AutomationNotifications"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "run_as": {
+     "description": "Required: explicitly choose the identity spawned sessions run under (organization or creator).",
+     "discriminator": {
+      "mapping": {
+       "creator": "#/components/schemas/AutomationRunAsCreator",
+       "organization": "#/components/schemas/AutomationRunAsOrganization"
+      },
+      "propertyName": "type"
+     },
+     "oneOf": [
+      {
+       "$ref": "#/components/schemas/AutomationRunAsOrganization"
+      },
+      {
+       "$ref": "#/components/schemas/AutomationRunAsCreator"
+      }
+     ],
+     "title": "Run As"
+    },
+    "security_profile": {
+     "anyOf": [
+      {
+       "$ref": "#/components/schemas/AutomationSecurityProfileSelection"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "The automation's own security-profile binding; omitted = inherit from the org/enterprise. Requires the security-profile management permission."
+    },
+    "session_settings": {
+     "anyOf": [
+      {
+       "$ref": "#/components/schemas/AutomationSessionSettings-Input"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Applied to sessions this automation spawns."
+    },
+    "template_id": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Create-only provenance marker; resolve ids via the templates endpoint. When set and tools.mcp_servers is omitted, the template's required_mcps apply.",
+     "title": "Template Id"
+    },
+    "tools": {
+     "anyOf": [
+      {
+       "$ref": "#/components/schemas/AutomationTools"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "triggers": {
+     "description": "Fires when any trigger matches; once per event. At most one webhook:incoming trigger.",
+     "items": {
+      "$ref": "#/components/schemas/AutomationTriggerRequest-Input"
+     },
+     "title": "Triggers",
+     "type": "array"
+    }
+   },
+   "required": [
+    "name",
+    "triggers",
+    "actions",
+    "run_as"
+   ],
+   "title": "AutomationCreateRequest",
+   "type": "object"
+  },
+  "AutomationEmailNotification": {
+   "additionalProperties": false,
+   "properties": {
+    "recipients": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "null = the automation creator; required for service-user-created automations.",
+     "title": "Recipients"
+    },
+    "when": {
+     "enum": [
+      "always",
+      "dispatch_failed",
+      "dispatch_succeeded"
+     ],
+     "title": "When",
+     "type": "string"
+    }
+   },
+   "required": [
+    "when"
+   ],
+   "title": "AutomationEmailNotification",
+   "type": "object"
+  },
+  "AutomationEmptyCondition": {
+   "additionalProperties": false,
+   "description": "Unary operator: matches on the field's emptiness; `value` carries no data.",
+   "properties": {
+    "field": {
+     "title": "Field",
+     "type": "string"
+    },
+    "operator": {
+     "enum": [
+      "is_empty",
+      "is_not_empty"
+     ],
+     "title": "Operator",
+     "type": "string"
+    },
+    "value": {
+     "title": "Value",
+     "type": "null"
+    }
+   },
+   "required": [
+    "field",
+    "operator"
+   ],
+   "title": "AutomationEmptyCondition",
+   "type": "object"
+  },
+  "AutomationGlobCondition": {
+   "additionalProperties": false,
+   "properties": {
+    "field": {
+     "title": "Field",
+     "type": "string"
+    },
+    "operator": {
+     "enum": [
+      "globs",
+      "not_globs"
+     ],
+     "title": "Operator",
+     "type": "string"
+    },
+    "value": {
+     "description": "Glob patterns; any changed path matches (github:push, gitlab:push).",
+     "items": {
+      "type": "string"
+     },
+     "title": "Value",
+     "type": "array"
+    }
+   },
+   "required": [
+    "field",
+    "operator",
+    "value"
+   ],
+   "title": "AutomationGlobCondition",
+   "type": "object"
+  },
+  "AutomationHostnameDestination": {
+   "additionalProperties": false,
+   "properties": {
+    "hostname": {
+     "title": "Hostname",
+     "type": "string"
+    }
+   },
+   "required": [
+    "hostname"
+   ],
+   "title": "AutomationHostnameDestination",
+   "type": "object"
+  },
+  "AutomationInvocationLimits": {
+   "additionalProperties": false,
+   "properties": {
+    "max_per_window": {
+     "minimum": 1.0,
+     "title": "Max Per Window",
+     "type": "integer"
+    },
+    "window_seconds": {
+     "minimum": 60.0,
+     "title": "Window Seconds",
+     "type": "integer"
+    }
+   },
+   "required": [
+    "max_per_window",
+    "window_seconds"
+   ],
+   "title": "AutomationInvocationLimits",
+   "type": "object"
+  },
+  "AutomationIpv4Destination": {
+   "additionalProperties": false,
+   "properties": {
+    "ipv4": {
+     "title": "Ipv4",
+     "type": "string"
+    }
+   },
+   "required": [
+    "ipv4"
+   ],
+   "title": "AutomationIpv4Destination",
+   "type": "object"
+  },
+  "AutomationIpv6Destination": {
+   "additionalProperties": false,
+   "properties": {
+    "ipv6": {
+     "title": "Ipv6",
+     "type": "string"
+    }
+   },
+   "required": [
+    "ipv6"
+   ],
+   "title": "AutomationIpv6Destination",
+   "type": "object"
+  },
+  "AutomationLimits": {
+   "additionalProperties": false,
+   "properties": {
+    "invocations": {
+     "anyOf": [
+      {
+       "$ref": "#/components/schemas/AutomationInvocationLimits"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Rate-limits the automation's own firing."
+    },
+    "max_acu_limit": {
+     "anyOf": [
+      {
+       "maximum": 1000.0,
+       "minimum": 1.0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Per spawned session (same name as the sessions API).",
+     "title": "Max Acu Limit"
+    }
+   },
+   "title": "AutomationLimits",
+   "type": "object"
+  },
+  "AutomationListCondition": {
+   "additionalProperties": false,
+   "properties": {
+    "field": {
+     "title": "Field",
+     "type": "string"
+    },
+    "operator": {
+     "enum": [
+      "in",
+      "not_in"
+     ],
+     "title": "Operator",
+     "type": "string"
+    },
+    "value": {
+     "items": {
+      "type": "string"
+     },
+     "title": "Value",
+     "type": "array"
+    }
+   },
+   "required": [
+    "field",
+    "operator",
+    "value"
+   ],
+   "title": "AutomationListCondition",
+   "type": "object"
+  },
+  "AutomationMatchCondition": {
+   "additionalProperties": false,
+   "properties": {
+    "field": {
+     "title": "Field",
+     "type": "string"
+    },
+    "operator": {
+     "enum": [
+      "matches",
+      "not_matches"
+     ],
+     "title": "Operator",
+     "type": "string"
+    },
+    "value": {
+     "description": "Regular expression.",
+     "title": "Value",
+     "type": "string"
+    }
+   },
+   "required": [
+    "field",
+    "operator",
+    "value"
+   ],
+   "title": "AutomationMatchCondition",
+   "type": "object"
+  },
+  "AutomationMessageSessionAction": {
+   "additionalProperties": false,
+   "properties": {
+    "auto_create": {
+     "default": false,
+     "description": "When true, the first trigger creates a new long-running session owned by the automation and subsequent triggers message it.",
+     "title": "Auto Create",
+     "type": "boolean"
+    },
+    "prompt": {
+     "description": "The triggering event's payload is appended automatically.",
+     "title": "Prompt",
+     "type": "string"
+    },
+    "target_devin_id": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Must belong to the org; editing an automation containing this action requires write access to the target session (enable/disable-only edits exempt). Required unless auto_create is true, in which case it is set server-side once the first trigger creates the session; client-supplied values are ignored.",
+     "title": "Target Devin Id"
+    },
+    "type": {
+     "const": "message_session",
+     "default": "message_session",
+     "title": "Type",
+     "type": "string"
+    }
+   },
+   "required": [
+    "prompt"
+   ],
+   "title": "AutomationMessageSessionAction",
+   "type": "object"
+  },
+  "AutomationMonitorSessionAction": {
+   "additionalProperties": false,
+   "properties": {
+    "setup_prompt": {
+     "description": "Injected into the session's system prompt. Same reference-token grammar as prompt.",
+     "title": "Setup Prompt",
+     "type": "string"
+    },
+    "slack_monitor_config": {
+     "$ref": "#/components/schemas/AutomationSlackMonitorConfig",
+     "description": "Requires exactly one slack:message trigger on the same channel."
+    },
+    "type": {
+     "const": "monitor_session",
+     "default": "monitor_session",
+     "title": "Type",
+     "type": "string"
+    }
+   },
+   "required": [
+    "setup_prompt",
+    "slack_monitor_config"
+   ],
+   "title": "AutomationMonitorSessionAction",
+   "type": "object"
+  },
+  "AutomationNetPolicy": {
+   "additionalProperties": false,
+   "properties": {
+    "allow": {
+     "items": {
+      "anyOf": [
+       {
+        "$ref": "#/components/schemas/AutomationHostnameDestination"
+       },
+       {
+        "$ref": "#/components/schemas/AutomationIpv4Destination"
+       },
+       {
+        "$ref": "#/components/schemas/AutomationIpv6Destination"
+       }
+      ]
+     },
+     "title": "Allow",
+     "type": "array"
+    }
+   },
+   "required": [
+    "allow"
+   ],
+   "title": "AutomationNetPolicy",
+   "type": "object"
+  },
+  "AutomationNotifications": {
+   "additionalProperties": false,
+   "properties": {
+    "email": {
+     "anyOf": [
+      {
+       "$ref": "#/components/schemas/AutomationEmailNotification"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "slack": {
+     "anyOf": [
+      {
+       "$ref": "#/components/schemas/AutomationSlackNotification"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    }
+   },
+   "title": "AutomationNotifications",
+   "type": "object"
+  },
+  "AutomationNumericCondition": {
+   "additionalProperties": false,
+   "properties": {
+    "field": {
+     "title": "Field",
+     "type": "string"
+    },
+    "operator": {
+     "enum": [
+      "gt",
+      "lt",
+      "gte",
+      "lte"
+     ],
+     "title": "Operator",
+     "type": "string"
+    },
+    "value": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "number"
+      }
+     ],
+     "title": "Value"
+    }
+   },
+   "required": [
+    "field",
+    "operator",
+    "value"
+   ],
+   "title": "AutomationNumericCondition",
+   "type": "object"
+  },
+  "AutomationRangeCondition": {
+   "additionalProperties": false,
+   "properties": {
+    "field": {
+     "title": "Field",
+     "type": "string"
+    },
+    "operator": {
+     "const": "between",
+     "title": "Operator",
+     "type": "string"
+    },
+    "value": {
+     "description": "Inclusive [low, high] range.",
+     "maxItems": 2,
+     "minItems": 2,
+     "prefixItems": [
+      {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "number"
+        }
+       ]
+      },
+      {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "number"
+        }
+       ]
+      }
+     ],
+     "title": "Value",
+     "type": "array"
+    }
+   },
+   "required": [
+    "field",
+    "operator",
+    "value"
+   ],
+   "title": "AutomationRangeCondition",
+   "type": "object"
+  },
+  "AutomationRecurrenceCondition": {
+   "additionalProperties": false,
+   "properties": {
+    "field": {
+     "title": "Field",
+     "type": "string"
+    },
+    "operator": {
+     "const": "recurrence",
+     "title": "Operator",
+     "type": "string"
+    },
+    "value": {
+     "description": "iCalendar RRULE for schedule:recurring's rrule field, e.g. FREQ=WEEKLY;BYDAY=MO;BYHOUR=9;BYMINUTE=0",
+     "title": "Value",
+     "type": "string"
+    }
+   },
+   "required": [
+    "field",
+    "operator",
+    "value"
+   ],
+   "title": "AutomationRecurrenceCondition",
+   "type": "object"
+  },
+  "AutomationReply": {
+   "additionalProperties": false,
+   "properties": {
+    "type": {
+     "description": "notify_thread: dispatch-time one-way 'session started' breadcrumb in the triggering thread (Slack triggers). attach_thread: dispatch-time two-way binding to the triggering thread (Slack triggers). post_response: deliver the agent's response to the triggering context.",
+     "enum": [
+      "notify_thread",
+      "attach_thread",
+      "post_response"
+     ],
+     "title": "Type",
+     "type": "string"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "title": "AutomationReply",
+   "type": "object"
+  },
+  "AutomationRunAsCreator": {
+   "additionalProperties": false,
+   "properties": {
+    "type": {
+     "const": "creator",
+     "default": "creator",
+     "title": "Type",
+     "type": "string"
+    }
+   },
+   "title": "AutomationRunAsCreator",
+   "type": "object"
+  },
+  "AutomationRunAsOrganization": {
+   "additionalProperties": false,
+   "properties": {
+    "type": {
+     "const": "organization",
+     "default": "organization",
+     "title": "Type",
+     "type": "string"
+    }
+   },
+   "title": "AutomationRunAsOrganization",
+   "type": "object"
+  },
+  "AutomationSecurityProfileSelection": {
+   "additionalProperties": false,
+   "description": "The automation's own security-profile binding.",
+   "properties": {
+    "profile_id": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Security profile to bind to this automation. null records an explicit opt-out (no profile, even when the org or enterprise has a recommended default). Writing this field requires the security-profile management permission; an opt-out cannot escape a mandatory org/enterprise profile.",
+     "title": "Profile Id"
+    }
+   },
+   "title": "AutomationSecurityProfileSelection",
+   "type": "object"
+  },
+  "AutomationSessionConfig-Input": {
+   "additionalProperties": false,
+   "properties": {
+    "bypass_approval": {
+     "default": false,
+     "description": "Auto-approves child-session creation (the only check this flag bypasses); any future bypassable check requires a new field.",
+     "title": "Bypass Approval",
+     "type": "boolean"
+    },
+    "notifications": {
+     "anyOf": [
+      {
+       "$ref": "#/components/schemas/AutomationSessionNotificationsConfig"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Session-content notifications (currently Slack only)."
+    },
+    "platform": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "VM platform for the session. When null, the session uses the organization's default platform at invocation time.",
+     "title": "Platform"
+    },
+    "playbook_id": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Read-only: derived from the first @playbook: token in the prompt.",
+     "title": "Playbook Id"
+    },
+    "repos": {
+     "default": [],
+     "description": "Read-only: derived from repo tokens in the prompt.",
+     "items": {
+      "type": "string"
+     },
+     "title": "Repos",
+     "type": "array"
+    },
+    "tags": {
+     "default": [],
+     "description": "Session tags. For tagging-enforced enterprises exactly one allowed value is required.",
+     "items": {
+      "type": "string"
+     },
+     "title": "Tags",
+     "type": "array"
+    }
+   },
+   "title": "AutomationSessionConfig",
+   "type": "object"
+  },
+  "AutomationSessionNotificationsConfig": {
+   "additionalProperties": false,
+   "description": "Where the spawned session's content goes, as opposed to the\nautomation-level ``notifications`` group (dispatch-status pings).",
+   "properties": {
+    "slack": {
+     "anyOf": [
+      {
+       "$ref": "#/components/schemas/AutomationSessionSlackConfig"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Gives the session a Slack home: two-way for post_updates/forward_thread and post_response after its initial delivery binds the thread."
+    }
+   },
+   "title": "AutomationSessionNotificationsConfig",
+   "type": "object"
+  },
+  "AutomationSessionSettings-Input": {
+   "additionalProperties": false,
+   "description": "Applied to every session this automation spawns (including monitor\nsessions).",
+   "properties": {
+    "devin_mode": {
+     "anyOf": [
+      {
+       "enum": [
+        "normal",
+        "fast",
+        "lite",
+        "ultra",
+        "fusion"
+       ],
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "null = org default.",
+     "title": "Devin Mode"
+    },
+    "net_policy": {
+     "anyOf": [
+      {
+       "$ref": "#/components/schemas/AutomationNetPolicy"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    }
+   },
+   "title": "AutomationSessionSettings",
+   "type": "object"
+  },
+  "AutomationSessionSlackConfig": {
+   "additionalProperties": false,
+   "properties": {
+    "channel_id": {
+     "title": "Channel Id",
+     "type": "string"
+    },
+    "mode": {
+     "description": "post_updates: the session converses in a thread in the channel (available for non-Slack triggers). forward_thread: the same, plus a backlink posted in the triggering thread (requires a Slack trigger). post_response: the session's final response is posted to the channel as a top-level message, then its thread is bound for replies and follow-up messages (available for any trigger).",
+     "enum": [
+      "post_updates",
+      "forward_thread",
+      "post_response"
+     ],
+     "title": "Mode",
+     "type": "string"
+    }
+   },
+   "required": [
+    "mode",
+    "channel_id"
+   ],
+   "title": "AutomationSessionSlackConfig",
+   "type": "object"
+  },
+  "AutomationSlackChannel": {
+   "additionalProperties": false,
+   "properties": {
+    "channel_id": {
+     "title": "Channel Id",
+     "type": "string"
+    },
+    "team_id": {
+     "title": "Team Id",
+     "type": "string"
+    }
+   },
+   "required": [
+    "team_id",
+    "channel_id"
+   ],
+   "title": "AutomationSlackChannel",
+   "type": "object"
+  },
+  "AutomationSlackMonitorConfig": {
+   "additionalProperties": false,
+   "properties": {
+    "source_channel_id": {
+     "title": "Source Channel Id",
+     "type": "string"
+    },
+    "team_id": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Team Id"
+    }
+   },
+   "required": [
+    "source_channel_id"
+   ],
+   "title": "AutomationSlackMonitorConfig",
+   "type": "object"
+  },
+  "AutomationSlackNotification": {
+   "additionalProperties": false,
+   "properties": {
+    "channel_id": {
+     "title": "Channel Id",
+     "type": "string"
+    },
+    "when": {
+     "enum": [
+      "always",
+      "dispatch_failed",
+      "dispatch_succeeded"
+     ],
+     "title": "When",
+     "type": "string"
+    }
+   },
+   "required": [
+    "when",
+    "channel_id"
+   ],
+   "title": "AutomationSlackNotification",
+   "type": "object"
+  },
+  "AutomationStartSessionAction-Input": {
+   "additionalProperties": false,
+   "properties": {
+    "prompt": {
+     "description": "The single source of truth: plain text with inline reference tokens (@{owner}/{repo}, @{path}, @playbook:{id}, @skills:{name}, !{macro}, ${SECRET_NAME}). Kind-prefixed tokens are validated at save; unknown ids are a 400. The triggering event's payload is appended automatically.",
+     "title": "Prompt",
+     "type": "string"
+    },
+    "session": {
+     "$ref": "#/components/schemas/AutomationSessionConfig-Input",
+     "description": "Config for the spawned session."
+    },
+    "type": {
+     "const": "start_session",
+     "default": "start_session",
+     "title": "Type",
+     "type": "string"
+    }
+   },
+   "required": [
+    "prompt"
+   ],
+   "title": "AutomationStartSessionAction",
+   "type": "object"
+  },
+  "AutomationStringCondition": {
+   "additionalProperties": false,
+   "properties": {
+    "field": {
+     "title": "Field",
+     "type": "string"
+    },
+    "operator": {
+     "enum": [
+      "contains",
+      "not_contains",
+      "starts_with",
+      "not_starts_with",
+      "ends_with",
+      "not_ends_with"
+     ],
+     "title": "Operator",
+     "type": "string"
+    },
+    "value": {
+     "title": "Value",
+     "type": "string"
+    }
+   },
+   "required": [
+    "field",
+    "operator",
+    "value"
+   ],
+   "title": "AutomationStringCondition",
+   "type": "object"
+  },
+  "AutomationTools": {
+   "additionalProperties": false,
+   "properties": {
+    "linear_enabled": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Grant Linear tools.",
+     "title": "Linear Enabled"
+    },
+    "mcp_servers": {
+     "default": [],
+     "description": "Marketplace slugs (the slug field of the mcp-servers resource, e.g. 'github', 'notion') enabled for spawned sessions. Servers installed with a personal (user-scoped) connection require run_as creator; selecting them with run_as organization is rejected since the Automations service identity has no personal token for them, and switching an automation's run_as to organization removes them from the stored selection.",
+     "items": {
+      "type": "string"
+     },
+     "title": "Mcp Servers",
+     "type": "array"
+    },
+    "slack_channels": {
+     "default": [],
+     "description": "Channels the session's Slack tools may post to.",
+     "items": {
+      "$ref": "#/components/schemas/AutomationSlackChannel"
+     },
+     "title": "Slack Channels",
+     "type": "array"
+    },
+    "slack_dm_scope": {
+     "anyOf": [
+      {
+       "enum": [
+        "org_members",
+        "workspace"
+       ],
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Allow spawned sessions to open 1:1 Slack DMs in the organization's connected workspaces. 'org_members' (enterprise accounts only) restricts DM targets to members of the organization; 'workspace' (non-enterprise accounts only) allows any eligible workspace member. Omit or null to disable DMs.",
+     "title": "Slack Dm Scope"
+    }
+   },
+   "title": "AutomationTools",
+   "type": "object"
+  },
+  "AutomationTriggerRequest-Input": {
+   "additionalProperties": false,
+   "properties": {
+    "conditions": {
+     "anyOf": [
+      {
+       "$ref": "#/components/schemas/AutomationConditions-Input"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "null matches every event."
+    },
+    "event_type": {
+     "description": "Trigger event type, e.g. 'github:pull_request'.",
+     "enum": [
+      "github:issue_comment",
+      "github:issues",
+      "github:pull_request",
+      "github:pull_request_review",
+      "github:pull_request_review_comment",
+      "github:check_run",
+      "github:push",
+      "gitlab:merge_request",
+      "gitlab:note",
+      "gitlab:issue",
+      "gitlab:issue_note",
+      "gitlab:push",
+      "gitlab:pipeline",
+      "schedule:recurring",
+      "slack:message",
+      "slack:reaction_added",
+      "linear:create",
+      "linear:label_added",
+      "linear:assigned",
+      "linear:status_changed",
+      "linear:priority_changed",
+      "linear:moved",
+      "jira:issue_created",
+      "jira:label_added",
+      "jira:status_changed",
+      "jira:assigned",
+      "pylon:issue_created",
+      "pylon:issue_tag_added",
+      "pylon:issue_status_changed",
+      "incident_io:incident_created",
+      "incident_io:status_changed",
+      "incident_io:severity_changed",
+      "incident_io:follow_up_created",
+      "webhook:incoming",
+      "snapshot_build:completed"
+     ],
+     "title": "Event Type",
+     "type": "string"
+    },
+    "replies": {
+     "default": [],
+     "description": "Where this trigger's session binds and its response is delivered. Only the matched trigger's replies execute, all entries independently; entries are deduplicated.",
+     "items": {
+      "$ref": "#/components/schemas/AutomationReply"
+     },
+     "title": "Replies",
+     "type": "array"
+    }
+   },
+   "required": [
+    "event_type"
+   ],
+   "title": "AutomationTriggerRequest",
+   "type": "object"
+  },
+  "SessionCreateRequest": {
+   "properties": {
+    "attachment_urls": {
+     "anyOf": [
+      {
+       "items": {
+        "format": "uri",
+        "maxLength": 2083,
+        "minLength": 1,
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Attachment Urls"
+    },
+    "bypass_approval": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Bypass Approval"
+    },
+    "child_playbook_id": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Child Playbook Id"
+    },
+    "create_as_user_id": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Create As User Id"
+    },
+    "devin_mode": {
+     "anyOf": [
+      {
+       "enum": [
+        "normal",
+        "fast",
+        "lite",
+        "ultra",
+        "fusion"
+       ],
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Override the Devin agent mode for the session. 'normal' uses the default Agent mode, 'fast' uses Fast mode, 'lite' uses Devin Lite, 'ultra' uses Devin Ultra, and 'fusion' uses Fusion. Preview modes are subject to the same feature flag and enterprise agent preview restrictions as the web app.",
+     "title": "Devin Mode"
+    },
+    "knowledge_ids": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Knowledge Ids"
+    },
+    "max_acu_limit": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Max Acu Limit"
+    },
+    "platform": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Override the VM platform for the session (e.g. 'windows'), or the name of an outpost (BYOB) pool to run the session on one of your own machines. When omitted (or set to 'inherit'), a session created by a parent Devin inherits the parent's placement \u2014 both its platform and its outpost pool, so an outpost-placed parent spawns children on the same pool; otherwise the organization default is used. Any value must match either a platform configured for your organization or an outpost pool name (case-insensitive) \u2014 built-in platforms take priority when a name matches both. Unrecognized values are rejected with a 400 whose error body lists the available platform labels and outpost pool names for the org.",
+     "title": "Platform"
+    },
+    "playbook_id": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Playbook Id"
+    },
+    "prompt": {
+     "title": "Prompt",
+     "type": "string"
+    },
+    "repos": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Repos"
+    },
+    "resumable": {
+     "default": true,
+     "description": "Whether to preserve the session's VM state after it stops so the session can be resumed. Set to false for disposable sessions.",
+     "title": "Resumable",
+     "type": "boolean"
+    },
+    "secret_ids": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Secret Ids"
+    },
+    "session_links": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Session Links"
+    },
+    "session_secrets": {
+     "anyOf": [
+      {
+       "items": {
+        "$ref": "#/components/schemas/SessionSecretInput"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Session Secrets"
+    },
+    "structured_output_required": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "When true (default), the agent MUST call provide_structured_output with is_final=true before its turn ends. When false, the tool is available but not required \u2014 it is not guaranteed to be called in a given turn.",
+     "title": "Structured Output Required"
+    },
+    "structured_output_schema": {
+     "anyOf": [
+      {
+       "additionalProperties": true,
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "JSON Schema (Draft 7) for validating structured output. Max 64KB. Must be self-contained (no external $ref).",
+     "title": "Structured Output Schema"
+    },
+    "tags": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Tags"
+    },
+    "title": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Title"
+    }
+   },
+   "required": [
+    "prompt"
+   ],
+   "title": "SessionCreateRequest",
+   "type": "object"
+  },
+  "SessionSecretInput": {
+   "description": "Input model for a session secret provided via API.",
+   "properties": {
+    "key": {
+     "maxLength": 256,
+     "minLength": 1,
+     "title": "Key",
+     "type": "string"
+    },
+    "sensitive": {
+     "default": true,
+     "title": "Sensitive",
+     "type": "boolean"
+    },
+    "value": {
+     "maxLength": 65536,
+     "title": "Value",
+     "type": "string"
+    }
+   },
+   "required": [
+    "key",
+    "value"
+   ],
+   "title": "SessionSecretInput",
+   "type": "object"
+  }
+ },
+ "source": "https://docs.devin.ai/v3-openapi.yaml"
+}

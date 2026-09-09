@@ -1,0 +1,16 @@
+# `docker compose up` runs the whole loop offline against fixtures (no API keys needed).
+# `docker compose run --rm orchestrator map` / `reduce --event-json /events/pr.json` /
+# `metrics` / `register` use the credentials from .env (copy .env.example).
+services:
+  orchestrator:
+    build: .
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TARGET_REPO: ${TARGET_REPO:-jhomer192/superset}
+      AUTOMATION_REPO: ${AUTOMATION_REPO:-jhomer192/superset-devin-automation}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./events:/events:ro
+    command: ["simulate"]

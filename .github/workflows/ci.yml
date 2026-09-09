@@ -1,0 +1,26 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e .[dev]
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: mypy orchestrator verify probes/lockfile_check.py
+      - run: pytest -q
+      - run: python -m orchestrator simulate > /dev/null
+      - run: python -m orchestrator register --dry-run > /dev/null
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose build
+      - run: docker compose run --rm orchestrator simulate > /dev/null

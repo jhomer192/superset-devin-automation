@@ -1,0 +1,16 @@
+{
+  "action": "closed",
+  "number": 14,
+  "pull_request": {
+    "number": 14,
+    "html_url": "https://github.com/jhomer192/superset/pull/14",
+    "title": "fix(sql): flush the KQL prefix before entering a multiline string",
+    "body": "Flushes the accumulated non-string buffer before switching to INSIDE_MULTILINE_STRING so statement text is not discarded.\n\nCloses #5",
+    "state": "closed",
+    "merged": true,
+    "merge_commit_sha": "1111111111111111111111111111111111111111",
+    "base": {"ref": "master", "sha": "fc110d8428f35249a2092778ca0a3e26a2de0b14"},
+    "head": {"ref": "devin/fix-kql-multiline", "sha": "2222222222222222222222222222222222222222"}
+  },
+  "repository": {"full_name": "jhomer192/superset"}
+}

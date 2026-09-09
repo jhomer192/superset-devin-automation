@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "superset-devin-automation"
+version = "0.1.0"
+description = "Event-driven remediation and regression-verification loop for jhomer192/superset on the Devin v3 API"
+requires-python = ">=3.11"
+dependencies = [
+    "jsonschema>=4.20,<5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<9",
+    "ruff>=0.5,<1",
+    "mypy>=1.10,<2",
+    "types-jsonschema",
+]
+
+[project.scripts]
+orchestrator = "orchestrator.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["orchestrator*"]
+
+[tool.setuptools.package-data]
+orchestrator = ["py.typed"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+extend-exclude = ["probes/issue_*/test_*.py", "probes/issue_*/sda_probe_*.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "W"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["orchestrator", "tests", "verify", "probes/lockfile_check.py"]
+explicit_package_bases = true
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_decorators = false
+disallow_untyped_defs = false
+disallow_untyped_calls = false
+disallow_incomplete_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
