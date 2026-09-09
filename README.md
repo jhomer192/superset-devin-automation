@@ -60,6 +60,11 @@ docker compose run --rm orchestrator reduce --event-json /events/pr.json
 docker compose run --rm orchestrator metrics --days 30
 ```
 
+Inside a Devin session the same values are available as the org secret
+`superset_remediation_bot` (Devin API key, service user `superset-remediation-bot`) and the
+personal secret `superset_github_key` (GitHub PAT for `jhomer192`). `register` is idempotent:
+it updates the two automations by name rather than creating duplicates.
+
 Secrets come from environment variables only; `.env.example` ships with empty values and
 `.env` is git-ignored. `orchestrator/config.py` is the complete list of settings.
 
