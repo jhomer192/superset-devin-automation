@@ -635,7 +635,8 @@ def test_automation_payloads_validate_against_openapi_and_carry_no_ceilings():
         automations.assert_no_ceilings(payload)
         assert payload["run_as"] == {"type": "organization"}
         assert sum(a["type"] == "start_session" for a in payload["actions"]) == 1
-        assert payload["session_settings"]["net_policy"] == {"allow": [{"hostname": "git-manager.devin.ai"}]}
+        hosts = {a["hostname"] for a in payload["session_settings"]["net_policy"]["allow"]}
+        assert {"git-manager.devin.ai", "api.github.com", "api.devin.ai", "pypi.org"} <= hosts
         assert f"@{AUTO}" in payload["actions"][0]["prompt"]
         assert "python -m orchestrator" in payload["actions"][0]["prompt"]
 

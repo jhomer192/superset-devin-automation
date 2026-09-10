@@ -7,7 +7,7 @@ Design constraints honoured here (see AutomationCreateRequest in the spec):
 * at most one start_session action, no monitor_session (deprecated for new automations)
 * run_as = {"type": "organization"} on all of them
 * no limits.max_acu_limit, no concurrency caps, no timeouts
-* net_policy allows git-manager.devin.ai so spawned sessions can clone
+* net_policy allows the git proxy, GitHub, the Devin API and PyPI; the shim needs nothing else
 * prompts are thin shims: clone this repo, run `python -m orchestrator <map|reduce|report>`
 """
 
@@ -27,7 +27,19 @@ HOURLY_RRULE = "FREQ=HOURLY"
 MAP_NAME = "superset-devin-automation: MAP (Friday ready-issue sweep)"
 REDUCE_NAME = "superset-devin-automation: REDUCE (verify merged PR)"
 REPORT_NAME = "superset-devin-automation: REPORT (publish session outcomes)"
-GIT_MANAGER_NET_POLICY = {"allow": [{"hostname": "git-manager.devin.ai"}]}
+NET_POLICY = {
+    "allow": [
+        {"hostname": h}
+        for h in (
+            "git-manager.devin.ai",
+            "github.com",
+            "api.github.com",
+            "api.devin.ai",
+            "pypi.org",
+            "files.pythonhosted.org",
+        )
+    ]
+}
 
 
 def _shim(automation_repo: str, command: str) -> str:
@@ -83,7 +95,7 @@ def map_payload(target_repo: str, automation_repo: str, playbook_id_fix: str | N
                 "session": {"tags": ["sda-map"]},
             }
         ],
-        "session_settings": {"net_policy": GIT_MANAGER_NET_POLICY},
+        "session_settings": {"net_policy": NET_POLICY},
     }
 
 
@@ -140,7 +152,7 @@ def reduce_payload(
                 "session": {"tags": ["sda-reduce"]},
             }
         ],
-        "session_settings": {"net_policy": GIT_MANAGER_NET_POLICY},
+        "session_settings": {"net_policy": NET_POLICY},
     }
 
 
@@ -186,7 +198,7 @@ def report_payload(
                 "session": {"tags": ["sda-report"]},
             }
         ],
-        "session_settings": {"net_policy": GIT_MANAGER_NET_POLICY},
+        "session_settings": {"net_policy": NET_POLICY},
     }
 
 
