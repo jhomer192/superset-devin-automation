@@ -259,6 +259,7 @@ def run_testing(
             f"({', '.join(f'#{p}' for p in report.window_prs)})",
             f"closes: {', '.join(f'#{n}' for n in closes) or 'none'}",
             f"regression guards: {', '.join(f'#{n}' for n in regression) or 'none'}",
+            f"PRD requirements guarded at HEAD: {', '.join(requirements) or 'none'}",
         ],
     )
     log.info("TESTING: %s -> session %s", key, session_id)
