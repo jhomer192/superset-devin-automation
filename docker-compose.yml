@@ -1,5 +1,5 @@
 # `docker compose up` runs the whole loop offline against fixtures (no API keys needed).
-# `docker compose run --rm orchestrator autopr` / `testing --wait --event-json /events/pr.json` /
+# `docker compose run --rm orchestrator autopr` / `find-and-fix --event-json /events/pr.json` /
 # `testing` / `autopr` / `register` / `register-playbooks` use the credentials from .env
 # (copy .env.example).
 services:
@@ -13,7 +13,7 @@ services:
       AUTOMATION_REPO: ${AUTOMATION_REPO:-jhomer192/superset-devin-automation}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       VERIFY_BRANCH: ${VERIFY_BRANCH:-master}
-      VERIFY_EVERY_N_MERGES: ${VERIFY_EVERY_N_MERGES:-5}
+      VERIFY_EVERY_N_MERGES: ${VERIFY_EVERY_N_MERGES:-1}
       PLAYBOOK_ID_FIX: ${PLAYBOOK_ID_FIX:-}
       PLAYBOOK_ID_VERIFY: ${PLAYBOOK_ID_VERIFY:-}
     volumes:
