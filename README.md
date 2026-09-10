@@ -4,14 +4,24 @@ An event-driven remediation and regression-verification loop for
 [jhomer192/superset](https://github.com/jhomer192/superset), driven by the
 [Devin v3 API](https://docs.devin.ai/v3-openapi.yaml).
 
-Two Devin Automations form one chain. All are thin shims: the session they start clones this
-repo and runs `python -m orchestrator ...`. Every decision — which issue gets a session, whether a
+One Devin Automation is a thin shim: the session it starts clones this repo and runs
+`python -m orchestrator find-and-fix`. Every decision — which issue gets a session, whether a
 merged PR gets verified, whether the fix worked — is made by code in this repository and is
 covered by `tests/`.
 
+## Where things are
+
+| | |
+|--|--|
+| This repo | orchestrator (`orchestrator/`), probes (`probes/`), the verification harness that runs on the Devin VM (`verify/`), fixtures for the offline run (`fixtures/`), tests (`tests/`) |
+| The fork | [jhomer192/superset](https://github.com/jhomer192/superset), `master`; the Devin GitHub app is installed on it |
+| Issues selected and remediated | [`ISSUES.md`](ISSUES.md): every issue filed on the fork with category, the cited file:line, the deciding probe, and its closing PR or the not-planned reason. Live state: [issues](https://github.com/jhomer192/superset/issues?q=is%3Aissue), [fix PRs](https://github.com/jhomer192/superset/pulls?q=is%3Apr+%22Closes+%23%22), [regression issues](https://github.com/jhomer192/superset/issues?q=label%3Asda-regression) the loop filed itself |
+| Run log | the `sda-status` issue on the fork: one comment per find-and-fix run |
+| Automation | `superset issue finder and fixer` in the Devin org, registered by `orchestrator register` |
+
 ```
 PR merges into master ──► find-and-fix (one invocation, one daemon-style pass)
-   1. TESTING: every merge (VERIFY_EVERY_N_MERGES=1; set 5 for every 5th), one verification session on a Devin VM
+   1. TESTING: every 5th merge (VERIFY_EVERY_N_MERGES=5; set 1 for every merge), one verification session on a Devin VM
       (clone Superset at HEAD and BASE, Postgres + Redis, build, boot, probes),
       wait for the verdict, comment it on every PR of the window
    2. acceptance_met == false ──► regression issues labelled `sda-regression`
@@ -45,8 +55,8 @@ prompt that is the same on every run:
 
 | Playbook | Body (`orchestrator/prompts.py`) | Attached schema | Used by |
 |----------|----------------------------------|-----------------|---------|
-| `superset-devin-automation: remediation` | `FIX_PLAYBOOK_BODY`: clone at master, branch, venv from `requirements/development.txt`, run every deciding probe and require non-zero at base, minimal fix following the fork's `AGENTS.md`, re-run probes and require 0, PR body with `Closes #NN`, Conventional Commits title, no AI attribution | `FIX_SCHEMA` | fix sessions started by AUTOPR's Friday sweep |
-| `superset-devin-automation: verification` | `VERIFY_PLAYBOOK_BODY`: clone this repo, run `verify/run_all.sh` with the given repo/head/base/issues, copy the resulting verify/out/result.json into the structured output verbatim, never modify `probes/` or `verify/`, no PR | `VERIFICATION_SCHEMA` | verification sessions started by TESTING |
+| `superset-devin-automation: remediation` | `FIX_PLAYBOOK_BODY`: clone at master, branch, venv from `requirements/development.txt`, run every deciding probe and require non-zero at base, minimal fix following the fork's `AGENTS.md`, re-run probes and require 0, PR body with `Closes #NN`, Conventional Commits title, no AI attribution | `FIX_SCHEMA` | fix sessions started by the `autopr` sweep over `ready` issues |
+| `superset-devin-automation: verification` | `VERIFY_PLAYBOOK_BODY`: clone this repo, run `verify/run_all.sh` with the given repo/head/base/issues, copy the resulting verify/out/result.json into the structured output verbatim, never modify `probes/` or `verify/`, no PR | `VERIFICATION_SCHEMA` | verification sessions started by find-and-fix step 1 (TESTING) |
 
 The per-session prompt is then only the variables: the `@owner/repo` token, the
 `@playbook:{id}` token, and the issue number/title/condition/URL and probe list (fix) or the
@@ -62,13 +72,21 @@ remediation playbook would contradict it.
 
 ## Run it
 
+Requirements: Docker with the compose plugin. Nothing else; the image carries Python 3.12 and
+the package.
+
 ### Offline, no keys (`simulate`)
 
 ```bash
+git clone https://github.com/jhomer192/superset-devin-automation && cd superset-devin-automation
 docker compose up            # builds the image and runs `python -m orchestrator simulate`
 # or, without docker:
 pip install -e . && python -m orchestrator simulate
 ```
+
+The command prints one JSON document: each step's report and, at the end, the comment ledger
+every issue and PR would carry. It exits non-zero if any step's structured output fails schema
+validation.
 
 `simulate` swaps the Devin and GitHub clients for in-memory fakes seeded from `fixtures/`
 (a snapshot of the fork's issues and a merged-PR webhook body) and walks the whole loop:
@@ -105,11 +123,21 @@ cp .env.example .env         # fill DEVIN_API_KEY, DEVIN_ORG_ID, GITHUB_TOKEN, V
 docker compose run --rm orchestrator register-playbooks --dry-run   # print validated playbook payloads
 docker compose run --rm orchestrator register-playbooks   # create/update both playbooks; prints PLAYBOOK_ID_*
 # put the printed PLAYBOOK_ID_FIX / PLAYBOOK_ID_VERIFY in .env, then:
-docker compose run --rm orchestrator register --dry-run   # print validated automation payloads
-docker compose run --rm orchestrator register             # create/update both automations (shims carry the ids)
-docker compose run --rm orchestrator autopr               # what Friday would do, right now
-docker compose run --rm orchestrator autopr --wait --event-json /events/issue.json   # one github:issues event
-docker compose run --rm orchestrator testing --wait --event-json /events/pr.json
+docker compose run --rm orchestrator register --dry-run   # print the validated automation payload
+docker compose run --rm orchestrator register             # create/update the automation (the shim carries the ids)
+```
+
+From here the loop runs itself: merge a PR into `VERIFY_BRANCH` on the fork and the automation
+starts one find-and-fix session, visible in the Devin sessions list under tag `sda-verify` and
+then `sda-fix`, with its report on the `sda-status` issue. The same run can be driven by hand
+with a saved webhook body (any `pull_request` `closed` event with `merged: true`; `./events` is
+mounted at `/events`):
+
+```bash
+docker compose run --rm orchestrator find-and-fix --event-json /events/pr.json   # steps 1–5, waits for every session
+docker compose run --rm orchestrator testing --wait --event-json /events/pr.json   # step 1–2 only
+docker compose run --rm orchestrator autopr --wait      # human-filed backlog: every open `ready` issue
+docker compose run --rm orchestrator autopr --wait --event-json /events/issue.json   # one regression issue
 ```
 
 Inside a Devin session the same values are available as the org secret
@@ -126,14 +154,14 @@ Secrets come from environment variables only; `.env.example` ships with empty va
 
 ## How a fix session is decided (AUTOPR)
 
-On a `github:issues` event (`run_autopr_for_issue` in `orchestrator/autopr_job.py`): the event
-must be `labeled`/`opened` with the `sda-regression` label for the target repo; the issue's
-ledger must carry the `regression_depth` entry TESTING wrote when it filed it (otherwise the
-issue was labelled by hand and nothing starts); an open PR closing it or a live `issue-<n>`
-session means skip; else one fix session starts from the recorded PR, HEAD and probes
-(`start_regression_fix` in `orchestrator/regression.py`).
+For a regression issue (find-and-fix step 3, or `autopr --event-json` with a `github:issues`
+body; `run_autopr_for_issue` in `orchestrator/autopr_job.py`): the issue's ledger must carry the
+`regression_depth` entry TESTING wrote when it filed it (otherwise the issue was labelled by hand
+and nothing starts); an open PR closing it or a live `issue-<n>` session means skip; else one fix
+session starts from the recorded PR, HEAD and probes (`start_regression_fix` in
+`orchestrator/regression.py`).
 
-On the Friday sweep, for every open issue labelled `ready`, in order:
+On the `autopr` sweep, for every open issue labelled `ready`, in order:
 
 1. **Already in flight?** An open PR whose body closes the issue, or a Devin session tagged
    `issue-<n>` that still holds its slot, means skip. Liveness follows the v3 status enum
@@ -178,7 +206,7 @@ from mutable state:
 
 ```
 VERIFY_BRANCH=main            # only PRs merged into this branch count (default: master)
-VERIFY_EVERY_N_MERGES=5       # verify when count % n == 0 (default: 5)
+VERIFY_EVERY_N_MERGES=5       # verify when count % n == 0 (default: 5; 1 verifies every merge)
 ```
 
 On each event, `run_testing` lists the PRs merged into `VERIFY_BRANCH` (`GET /pulls?state=closed&base=…`,
@@ -294,8 +322,8 @@ table with both exit codes and the captured evidence, plus a `regression_depth` 
 the PR, window and probes. If an open `sda-regression` issue's `regression_depth` record already
 names exactly the same probe set, the run adopts that issue (a `regression_filed` entry with
 `adopted: true` on the PR and a comment on the issue) instead of filing another; a different or
-larger probe set, or a closed issue, still files. The `labeled` event for `sda-regression` runs
-AUTOPR, which reads that entry and starts one fix session tagged `sda-fix`/`sda-regression`. The
+larger probe set, or a closed issue, still files. Step 3 of the same find-and-fix run reads that
+entry and starts one fix session tagged `sda-fix`/`sda-regression`. The
 verdict comment still lands on every PR thread in the window; only the remediation is once per
 failed verification, whatever the cadence. That session must reproduce the failure before
 touching anything, make the smallest fix, add a test, and run the probes and the surrounding unit
@@ -304,7 +332,7 @@ probes are the contract in both directions: the issue states they must not be ed
 
 Two things keep the loop finite. A `regression_filed` marker keyed by the verification session,
 found on any PR thread in the window, means the failure already has an issue, so a replayed
-TESTING run does not file it twice, and a replayed issue event finds the live `issue-<n>`
+TESTING run does not file it twice, and the next find-and-fix run finds the live `issue-<n>`
 session or the open fix PR and starts nothing. And each filed issue records its
 `regression_depth`; a PR that closes a regression issue inherits it, so after `MAX_CHAIN_DEPTH`
 failed automated attempts on the same chain the run writes `regression_escalated` on the PR and
@@ -324,7 +352,7 @@ CI (`.github/workflows/ci.yml`) runs the same plus `docker compose build` and a 
 
 ## Deviations from the brief
 
-* **Cadence.** Nothing runs on a clock. Verification runs on every merge into `VERIFY_BRANCH`
+* **Cadence.** Nothing runs on a clock. Verification runs on every 5th merge into `VERIFY_BRANCH`
   by default, or every *n*th with `VERIFY_EVERY_N_MERGES=n`. The counter is not held by the automation — it cannot be, there is
   no callback action — but computed from the branch's merged-PR history on each event.
 * **Regression guards.** TESTING runs the probes for already-landed fixes too, not only the PR's

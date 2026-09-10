@@ -1,7 +1,7 @@
 """Build and register the one automation (find-and-fix) through the Automations API.
 
-find-and-fix is the daemon: a PR merges -> verify (every merge by default; VERIFY_EVERY_N_MERGES=5 for
-every 5th), wait for the verdict, post it on every PR of the window, file an `sda-regression`
+find-and-fix is the daemon: a PR merges -> verify (every 5th merge by default; VERIFY_EVERY_N_MERGES=1
+for every merge), wait for the verdict, post it on every PR of the window, file an `sda-regression`
 issue on failure -> start one fix session per `sda-regression` issue opened in the last N hours ->
 wait for all of them (none is fine) -> append the find-and-fix report to the status issue -> the fix PRs
 merge and re-enter the loop. Each stage publishes its own telemetry; there is no sweeper and no
@@ -85,7 +85,7 @@ def finder_payload(
     target_repo: str,
     automation_repo: str,
     verify_branch: str = "master",
-    every_n: int = 1,
+    every_n: int = 5,
     issue_window_hours: int = 24,
     playbook_id_verify: str | None = None,
     playbook_id_fix: str | None = None,
@@ -187,7 +187,7 @@ def register(
     automation_repo: str,
     *,
     verify_branch: str = "master",
-    every_n: int = 1,
+    every_n: int = 5,
     issue_window_hours: int = 24,
     playbook_id_fix: str | None = None,
     playbook_id_verify: str | None = None,

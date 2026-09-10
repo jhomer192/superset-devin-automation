@@ -353,7 +353,7 @@ def test_verify_settings_from_environment(monkeypatch):
     monkeypatch.delenv("VERIFY_BRANCH", raising=False)
     monkeypatch.delenv("VERIFY_EVERY_N_MERGES", raising=False)
     s = load_settings(simulate=True)
-    assert s.verify_branch == "master" and s.verify_every_n_merges == 1
+    assert s.verify_branch == "master" and s.verify_every_n_merges == 5
     monkeypatch.setenv("VERIFY_BRANCH", "main")
     monkeypatch.setenv("VERIFY_EVERY_N_MERGES", "3")
     s = load_settings(simulate=True)
@@ -371,7 +371,7 @@ def test_verify_settings_from_environment(monkeypatch):
 def test_automation_payloads_validate_against_openapi_and_carry_no_ceilings():
     for payload in (
         automations.finder_payload(REPO, AUTO),
-        automations.finder_payload(REPO, AUTO, every_n=5),
+        automations.finder_payload(REPO, AUTO, every_n=1),
     ):
         assert automations.validate_payload(payload) == []
         automations.assert_no_ceilings(payload)
@@ -383,11 +383,11 @@ def test_automation_payloads_validate_against_openapi_and_carry_no_ceilings():
         assert "python -m orchestrator" in payload["actions"][0]["prompt"]
 
 
-def test_finder_triggers_on_merged_prs_only_and_verifies_every_merge_by_default():
-    assert "VERIFY_EVERY_N_MERGES=1 " in automations.finder_payload(REPO, AUTO)["actions"][0]["prompt"]
+def test_finder_triggers_on_merged_prs_only_and_verifies_every_fifth_merge_by_default():
+    assert "VERIFY_EVERY_N_MERGES=5 " in automations.finder_payload(REPO, AUTO)["actions"][0]["prompt"]
     assert (
-        "VERIFY_EVERY_N_MERGES=5 "
-        in automations.finder_payload(REPO, AUTO, every_n=5)["actions"][0]["prompt"]
+        "VERIFY_EVERY_N_MERGES=1 "
+        in automations.finder_payload(REPO, AUTO, every_n=1)["actions"][0]["prompt"]
     )
     finder = automations.finder_payload(REPO, AUTO, issue_window_hours=6)
     (r,) = finder["triggers"]

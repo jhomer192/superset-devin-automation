@@ -10,7 +10,7 @@
         "ready",
         "security"
       ],
-      "state": "open",
+      "state": "closed",
       "condition": "superset/initialization/__init__.py:1131 has check_websocket_secret and no cookie check; superset/config.py:2853-2854 ship SESSION_COOKIE_SECURE=False, SESSION_COOKIE_SAMESITE=\"Lax\" with no validation of the SameSite=None/Secure pair",
       "probes": [
         {
@@ -25,7 +25,8 @@
         }
       ],
       "closing_pr": "https://github.com/jhomer192/superset/pull/13",
-      "closing_pr_state": "open"
+      "closing_pr_state": "merged",
+      "state_reason": "completed"
     },
     {
       "number": 2,
@@ -49,7 +50,7 @@
         "ready",
         "code-quality"
       ],
-      "state": "open",
+      "state": "closed",
       "condition": "superset/charts/data/api.py:802-803 and superset/sqllab/api.py:437-438 both hard-code chunk_size = 1024 under a TODO; superset/commands/streaming_export/base.py:74 defaults to 1000",
       "probes": [
         {
@@ -59,7 +60,8 @@
         }
       ],
       "closing_pr": "https://github.com/jhomer192/superset/pull/16",
-      "closing_pr_state": "open"
+      "closing_pr_state": "merged",
+      "state_reason": "completed"
     },
     {
       "number": 4,
@@ -89,7 +91,7 @@
         "ready",
         "correctness"
       ],
-      "state": "open",
+      "state": "closed",
       "condition": "superset/sql/parse.py:1795-1797 (tokenize_kql) sets buffer = \"```\" on entering INSIDE_MULTILINE_STRING instead of flushing the accumulated prefix",
       "probes": [
         {
@@ -99,7 +101,8 @@
         }
       ],
       "closing_pr": "https://github.com/jhomer192/superset/pull/14",
-      "closing_pr_state": "open"
+      "closing_pr_state": "merged",
+      "state_reason": "completed"
     },
     {
       "number": 6,
