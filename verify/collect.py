@@ -41,25 +41,19 @@ def build_results(
         if req.id in requirements:
             for pid in req.probes:
                 guarded_by.setdefault(pid, []).append(req.id)
-    by_probe: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        entry = by_probe.setdefault(row["probe"], {"issue": row["issue"], "kind": row["kind"]})
-        entry[row["role"]] = row
     results: list[dict[str, Any]] = []
-    for probe_id, entry in by_probe.items():
-        head = entry.get("head")
-        head_code = int(head["exit_code"]) if head else 255
+    for row in rows:
+        probe_id = str(row["probe"])
+        head_code = int(row["exit_code"])
         reqs = guarded_by.get(probe_id, [])
-        met = bool(reqs) and head_code == 0
-        evidence = f"HEAD exit {head_code}:\n{_tail(head['log']) if head else '<not run>'}"
         results.append(
             {
-                "issue": int(entry["issue"]),
+                "issue": int(row["issue"]),
                 "probe": probe_id,
-                "kind": entry["kind"],
+                "kind": row["kind"],
                 "head_exit_code": head_code,
-                "acceptance_met": met,
-                "evidence": evidence,
+                "acceptance_met": bool(reqs) and head_code == 0,
+                "evidence": f"HEAD exit {head_code}:\n{_tail(row['log'])}",
                 "requirements": reqs,
             }
         )
