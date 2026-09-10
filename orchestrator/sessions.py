@@ -77,12 +77,14 @@ def holds_slot(status: str | None, status_detail: str | None) -> bool:
 def wait_until_finished(
     devin: DevinClient, session_id: str, sleep: Callable[[float], None] = time.sleep
 ) -> dict[str, Any]:
-    """Poll until the session is finished. No deadline: a verification takes as long as building
-    and booting Superset twice takes, and a session that is waiting on a human holds the slot
-    until that human acts."""
+    """Poll until the session has written its structured output or is finished. No deadline: a
+    verification takes as long as building and booting Superset twice takes, and a session that is
+    waiting on a human without a result holds the slot until that human acts."""
     while True:
         session = devin.get_session(session_id)
-        if is_finished(session.get("status"), session.get("status_detail")):
+        if session.get("structured_output") or is_finished(
+            session.get("status"), session.get("status_detail")
+        ):
             return session
         log.info("%s is %s/%s, waiting", session_id, session.get("status"), session.get("status_detail"))
         sleep(POLL_SECONDS)

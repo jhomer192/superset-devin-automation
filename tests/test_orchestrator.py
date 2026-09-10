@@ -7,11 +7,12 @@ from orchestrator import automations
 from orchestrator.__main__ import cmd_simulate
 from orchestrator.autopr_job import NotARegressionIssue, extract_regression_issue, run_autopr
 from orchestrator.config import load_settings
+from orchestrator.cycle import run_cycle
 from orchestrator.github_api import closing_issue_numbers
 from orchestrator.ledger import IssueLedger, find
 from orchestrator.publish import publish_verification
 from orchestrator.registry import load_registry
-from orchestrator.sessions import Liveness, classify, holds_slot, is_finished
+from orchestrator.sessions import Liveness, classify, holds_slot, is_finished, wait_until_finished
 from orchestrator.simulate import FakeDevin, FakeGitHub, issue_event, load_event
 from orchestrator.testing_job import NotAMergedPR, extract_merged_pr, run_testing
 from orchestrator.triage import Decision, Reason
@@ -370,7 +371,7 @@ def test_verify_settings_from_environment(monkeypatch):
 def test_automation_payloads_validate_against_openapi_and_carry_no_ceilings():
     for payload in (
         automations.autopr_payload(REPO, AUTO),
-        automations.testing_payload(REPO, AUTO),
+        automations.cycle_payload(REPO, AUTO),
     ):
         assert automations.validate_payload(payload) == []
         automations.assert_no_ceilings(payload)
@@ -382,19 +383,19 @@ def test_automation_payloads_validate_against_openapi_and_carry_no_ceilings():
         assert "python -m orchestrator" in payload["actions"][0]["prompt"]
 
 
-def test_autopr_triggers_on_the_regression_label_and_friday_and_testing_on_merged_prs():
-    issue_trigger, friday = automations.autopr_payload(REPO, AUTO)["triggers"]
-    assert issue_trigger["event_type"] == "github:issues"
-    conds = {c["field"]: c["value"] for c in issue_trigger["conditions"]["any"][0]["all"]}
-    assert conds == {"action": "labeled", "label.name": "sda-regression", "repository.full_name": REPO}
+def test_autopr_triggers_on_friday_only_and_cycle_on_merged_prs():
+    (friday,) = automations.autopr_payload(REPO, AUTO)["triggers"]
     assert friday["event_type"] == "schedule:recurring"
     assert friday["conditions"]["any"][0]["all"] == [
         {"field": "rrule", "operator": "recurrence", "value": "FREQ=WEEKLY;BYDAY=FR"}
     ]
-    r = automations.testing_payload(REPO, AUTO)["triggers"][0]
+    cycle = automations.cycle_payload(REPO, AUTO, issue_window_hours=6)
+    (r,) = cycle["triggers"]
     assert r["event_type"] == "github:pull_request"
     conds = {c["field"]: c["value"] for c in r["conditions"]["any"][0]["all"]}
     assert conds == {"action": "closed", "pull_request.merged": True, "repository.full_name": REPO}
+    prompt = cycle["actions"][0]["prompt"]
+    assert "CYCLE_ISSUE_WINDOW_HOURS=6 " in prompt and "python -m orchestrator cycle" in prompt
 
 
 def test_invalid_payloads_are_rejected():
@@ -445,9 +446,9 @@ def with_retired_automations(devin):
 def test_register_deletes_retired_automations_only_after_the_replacements_exist():
     devin = with_retired_automations(OrderedDevin())
     results = automations.register(devin, REPO, AUTO)
-    assert devin.order == ["create"] * 2 + ["delete"] * 3
+    assert devin.order == ["create"] * 2 + ["delete"] * len(automations.RETIRED_NAMES)
     assert {a["name"] for a in devin.automations.values()} == {
-        automations.TESTING_NAME,
+        automations.CYCLE_NAME,
         automations.AUTOPR_NAME,
     }
     assert [r["name"] for r in results if r.get("deleted")] == list(automations.RETIRED_NAMES)
@@ -759,7 +760,8 @@ def test_a_failure_is_only_filed_once(registry, world):
     first = fail_verification(devin, gh, registry)
     issues_after = set(gh.issues)
     replay = verify_and_wait(devin, gh, registry)
-    assert replay.skipped_reason and replay.regression_filed is None and set(gh.issues) == issues_after
+    assert replay.session_id == first.session_id and replay.verdict == first.verdict
+    assert replay.regression_filed is None and set(gh.issues) == issues_after
     assert find(IssueLedger(gh, REPO).read(14), "regression_filed", issue=first.regression_filed["issue"])
 
 
@@ -953,3 +955,109 @@ def test_autopr_run_is_logged_on_the_status_issue_with_pr_and_acus(registry, wor
     assert len(runs) == 1 and runs[0].data["finished"][0]["pr_url"].endswith("/pull/900")
     body = gh.comments[status][-1]["body"]
     assert "pull/900" in body and "ACU" in body
+
+
+# --- cycle ---------------------------------------------------------------------------------------
+
+
+def test_a_session_parked_waiting_for_user_with_its_output_written_counts_as_finished():
+    devin = FakeDevin()
+    sid = devin.create_session({"prompt": "x", "tags": ["sda-verify"], "structured_output_schema": {}})[
+        "session_id"
+    ]
+    devin.sessions[sid]["status"], devin.sessions[sid]["status_detail"] = "running", "waiting_for_user"
+    polls = []
+
+    def _sleep(_s):
+        polls.append(1)
+        devin.sessions[sid]["structured_output"] = {"acceptance_met": False}
+
+    session = wait_until_finished(devin, sid, _sleep)
+    assert len(polls) == 1 and session["structured_output"] == {"acceptance_met": False}
+    assert not is_finished("running", "waiting_for_user")
+
+
+def finish_everything(devin, fix_outcome="ok"):
+    """Sleep stand-in for a cycle: verifications fail, fix sessions land with a PR."""
+
+    def _sleep(_seconds):
+        for sid, session in list(devin.sessions.items()):
+            if session["structured_output"] is not None:
+                continue
+            if "sda-fix" in session["tags"]:
+                devin.advance(sid, outcome=fix_outcome, acus=2.0, pr_url=f"https://github.com/{REPO}/pull/99")
+            else:
+                devin.advance(sid, outcome="failed", acus=5.0)
+
+    return _sleep
+
+
+def do_cycle(devin, gh, registry, **kwargs):
+    return run_cycle(
+        devin=devin,
+        gh=gh,
+        registry=registry,
+        target_repo=REPO,
+        automation_repo=AUTO,
+        event=load_event(),
+        verify_branch="master",
+        every_n=1,
+        sleep=finish_everything(devin),
+        **kwargs,
+    )
+
+
+def test_cycle_verifies_fixes_every_recent_regression_waits_and_reports(registry, world):
+    devin, gh = world
+    out = do_cycle(devin, gh, registry)
+    issue = out.testing["regression_filed"]["issue"]
+    assert out.testing["verdict"] == "acceptance NOT met" and out.candidates == [issue]
+    (finished,) = out.fixes["finished"]
+    assert finished["issue"] == issue and finished["verdict"] == "acceptance met"
+    assert finished["pr_url"].endswith("/pull/99") and finished["acus"] == 2.0
+    fixes = [s for s in devin.sessions.values() if "sda-fix" in s["tags"]]
+    assert len(fixes) == 1 and f"issue-{issue}" in fixes[0]["tags"]
+    assert out.status_issue is not None
+    rollup = gh.comments[out.status_issue][-1]["body"]
+    assert "CYCLE:" in rollup and f"#{issue}" in rollup and "total ACUs: 2" in rollup
+    assert find(IssueLedger(gh, REPO).read(out.status_issue), "run_reported", stage="cycle")
+
+
+def test_cycle_replay_starts_nothing_new_and_reports_once(registry, world):
+    devin, gh = world
+    first = do_cycle(devin, gh, registry)
+    issue = first.testing["regression_filed"]["issue"]
+    gh.open_pull(99, title=f"fix: regression #{issue}", body=f"Closes #{issue}")
+    before = len(devin.sessions), len(gh.comments[first.status_issue])
+    again = do_cycle(devin, gh, registry)
+    assert again.fixes["started"] == [] and again.status_issue is None
+    assert "already closes" in again.fixes["skipped_in_flight"][0]["reason"]
+    assert (len(devin.sessions), len(gh.comments[first.status_issue])) == before
+
+
+def test_cycle_ignores_regression_issues_older_than_the_window(registry, world):
+    devin, gh = world
+    verify_and_wait(devin, gh, registry)
+    for issue in gh.issues.values():
+        if any(lb["name"] == "sda-regression" for lb in issue["labels"]):
+            issue["created_at"] = "2000-01-01T00:00:00Z"
+    out = do_cycle(devin, gh, registry, issue_window_hours=1)
+    assert out.candidates == [] and out.fixes["started"] == []
+    assert not [s for s in devin.sessions.values() if "sda-fix" in s["tags"]]
+
+
+def test_cycle_on_an_uncounted_merge_only_counts(registry, world):
+    devin, gh = world
+    out = run_cycle(
+        devin=devin,
+        gh=gh,
+        registry=registry,
+        target_repo=REPO,
+        automation_repo=AUTO,
+        event=load_event(),
+        verify_branch="master",
+        every_n=5,
+        sleep=finish_everything(devin),
+    )
+    assert out.testing["session_id"] is None and out.testing["skipped_reason"]
+    assert out.fixes["started"] == [] and out.status_issue is None and devin.sessions == {}

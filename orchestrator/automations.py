@@ -1,11 +1,11 @@
-"""Build and register the two automations (TESTING, AUTOPR) through the Automations API.
+"""Build and register the two automations (CYCLE, AUTOPR) through the Automations API.
 
-The chain: a PR merges -> TESTING verifies every 5th merge, waits for the verdict, posts it on
-every PR of the window and files an `sda-regression` issue on failure -> that issue's
-`github:issues` event fires AUTOPR, which starts the fix session, waits for it and posts its
-outcome on the issue -> the fix PR merges and re-enters TESTING. Each stage publishes its own
-telemetry; there is no sweeper. Automations under retired names (MAP, REDUCE, REPORT) are deleted
-on register.
+CYCLE is the daemon: a PR merges -> verify every 5th merge, wait for the verdict, post it on
+every PR of the window, file an `sda-regression` issue on failure -> start one fix session per
+`sda-regression` issue opened in the last N hours -> wait for all of them (none is fine) -> append
+the cycle report to the status issue -> the fix PRs merge and re-enter the cadence. AUTOPR is the
+Friday sweep over `ready` issues. Each stage publishes its own telemetry; there is no sweeper.
+Automations under retired names (MAP, REDUCE, REPORT, TESTING) are deleted on register.
 
 Every payload is validated locally against the request schemas vendored from
 https://docs.devin.ai/v3-openapi.yaml (orchestrator/v3_schemas.json) before anything is sent.
@@ -15,7 +15,7 @@ Design constraints honoured here (see AutomationCreateRequest in the spec):
 * run_as = {"type": "organization"} on all of them
 * no limits.max_acu_limit, no concurrency caps, no timeouts
 * net_policy allows the git proxy, GitHub, the Devin API and PyPI; the shim needs nothing else
-* prompts are thin shims: clone this repo, run `python -m orchestrator <autopr|testing> --wait`
+* prompts are thin shims: clone this repo, run `python -m orchestrator <cycle|autopr> --wait`
 """
 
 from __future__ import annotations
@@ -31,9 +31,11 @@ from .regression import REGRESSION_LABEL
 
 SCHEMAS_PATH = Path(__file__).with_name("v3_schemas.json")
 FRIDAY_RRULE = "FREQ=WEEKLY;BYDAY=FR"
-AUTOPR_NAME = "superset-devin-automation: AUTOPR (fix session per regression issue + Friday sweep)"
-TESTING_NAME = "superset-devin-automation: TESTING (verify every 5th merge, file regressions)"
+AUTOPR_NAME = "superset-devin-automation: AUTOPR (Friday ready-issue sweep)"
+CYCLE_NAME = "superset-devin-automation: CYCLE (verify every 5th merge, fix regressions, report)"
 RETIRED_NAMES = (
+    "superset-devin-automation: AUTOPR (fix session per regression issue + Friday sweep)",
+    "superset-devin-automation: TESTING (verify every 5th merge, file regressions)",
     "superset-devin-automation: MAP (Friday ready-issue sweep)",
     "superset-devin-automation: REDUCE (verify merged PR)",
     "superset-devin-automation: REPORT (publish session outcomes)",
@@ -83,16 +85,11 @@ def autopr_payload(
     prompt = (
         _shim(
             automation_repo,
-            _env_prefix("PLAYBOOK_ID_FIX", playbook_id_fix)
-            + "python -m orchestrator autopr --wait --event-json event.json  "
-            "(if the triggering event is a github:issues payload, first write it to event.json unmodified; "
-            "if the trigger is the schedule, run without --event-json)",
+            _env_prefix("PLAYBOOK_ID_FIX", playbook_id_fix) + "python -m orchestrator autopr --wait",
         )
         + f"\nTarget repository for issues: @{target_repo}\n"
-        + f"An issue event means TESTING filed a `{REGRESSION_LABEL}` issue: the command starts the one fix "
-        "session for that issue. The Friday schedule triages every open `ready` issue instead. Either "
-        "way the command waits for the fix sessions and posts each outcome on its issue; it can run for "
-        "hours, keep waiting.\n"
+        + "The command triages every open `ready` issue, starts one fix session per eligible issue, waits "
+        "for them and posts each outcome on its issue; it can run for hours, keep waiting.\n"
     )
     return {
         "name": AUTOPR_NAME,
@@ -104,22 +101,6 @@ def autopr_payload(
             "playbook_id_fix": playbook_id_fix or "",
         },
         "triggers": [
-            {
-                "event_type": "github:issues",
-                # GitHub sends one `labeled` event per label on an issue created with labels, so
-                # this single condition covers both create-with-label and label-later.
-                "conditions": {
-                    "any": [
-                        {
-                            "all": [
-                                {"field": "action", "operator": "eq", "value": "labeled"},
-                                {"field": "label.name", "operator": "eq", "value": REGRESSION_LABEL},
-                                {"field": "repository.full_name", "operator": "eq", "value": target_repo},
-                            ]
-                        }
-                    ]
-                },
-            },
             {
                 "event_type": "schedule:recurring",
                 "conditions": {
@@ -138,37 +119,45 @@ def autopr_payload(
     }
 
 
-def testing_payload(
+def cycle_payload(
     target_repo: str,
     automation_repo: str,
     verify_branch: str = "master",
     every_n: int = 5,
+    issue_window_hours: int = 24,
     playbook_id_verify: str | None = None,
+    playbook_id_fix: str | None = None,
 ) -> dict[str, Any]:
     prompt = (
         _shim(
             automation_repo,
             f"VERIFY_BRANCH={verify_branch} VERIFY_EVERY_N_MERGES={every_n} "
+            f"CYCLE_ISSUE_WINDOW_HOURS={issue_window_hours} "
             + _env_prefix("PLAYBOOK_ID_VERIFY", playbook_id_verify)
-            + "python -m orchestrator testing --wait --event-json event.json  "
+            + _env_prefix("PLAYBOOK_ID_FIX", playbook_id_fix)
+            + "python -m orchestrator cycle --event-json event.json  "
             "(first write the appended pull_request event payload to event.json, unmodified)",
         )
         + f"\nTarget repository: @{target_repo}\n"
         + f"Cadence: the orchestrator only starts a verification session for every {every_n}th PR "
-        f"merged into `{verify_branch}`; on other merges it records the count and exits. With --wait it "
-        "blocks until that verification finishes, however long that takes, then posts the verdict on every "
-        f"PR of the window and files a `{REGRESSION_LABEL}` issue if it failed. Do not interrupt it.\n"
+        f"merged into `{verify_branch}`; on other merges it records the count and exits. Otherwise it "
+        "blocks until that verification finishes, posts the verdict on every PR of the window, files a "
+        f"`{REGRESSION_LABEL}` issue if it failed, starts one fix session per `{REGRESSION_LABEL}` issue "
+        f"opened in the last {issue_window_hours}h, waits for all of them and appends the cycle report to "
+        "the status issue. It can run for hours. Do not interrupt it.\n"
     )
     return {
-        "name": TESTING_NAME,
+        "name": CYCLE_NAME,
         "enabled": True,
         "run_as": {"type": "organization"},
         "metadata": {
-            "component": "testing",
+            "component": "cycle",
             "target_repo": target_repo,
             "verify_branch": verify_branch,
             "verify_every_n_merges": str(every_n),
+            "issue_window_hours": str(issue_window_hours),
             "playbook_id_verify": playbook_id_verify or "",
+            "playbook_id_fix": playbook_id_fix or "",
         },
         "triggers": [
             {
@@ -190,7 +179,7 @@ def testing_payload(
             {
                 "type": "start_session",
                 "prompt": prompt,
-                "session": {"tags": ["sda-testing"]},
+                "session": {"tags": ["sda-cycle"]},
             }
         ],
         "session_settings": {"net_policy": NET_POLICY},
@@ -237,6 +226,7 @@ def register(
     *,
     verify_branch: str = "master",
     every_n: int = 5,
+    issue_window_hours: int = 24,
     playbook_id_fix: str | None = None,
     playbook_id_verify: str | None = None,
     dry_run: bool = False,
@@ -249,7 +239,15 @@ def register(
     results: list[dict[str, Any]] = []
     existing = {a.get("name"): a for a in devin.list_automations()} if not dry_run else {}
     payloads = (
-        testing_payload(target_repo, automation_repo, verify_branch, every_n, playbook_id_verify),
+        cycle_payload(
+            target_repo,
+            automation_repo,
+            verify_branch,
+            every_n,
+            issue_window_hours,
+            playbook_id_verify,
+            playbook_id_fix,
+        ),
         autopr_payload(target_repo, automation_repo, playbook_id_fix),
     )
     for payload in payloads:

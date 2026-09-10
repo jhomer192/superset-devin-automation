@@ -10,26 +10,27 @@ merged PR gets verified, whether the fix worked — is made by code in this repo
 covered by `tests/`.
 
 ```
-PR merges into master ──► TESTING (every 5th merge): verification session, wait for verdict,
-                          verdict comment on every PR of the window
-                             │ acceptance_met == false
-                             ▼
-                          regression issue labelled `sda-regression`
-                             │ github:issues "labeled" event
-                             ▼
-                          AUTOPR: one fix session for that issue ──► fix PR ──► merges ──► TESTING
+PR merges into master ──► CYCLE (one invocation, one daemon-style pass)
+   1. TESTING: every 5th merge, one verification session on a Devin VM
+      (clone Superset at HEAD and BASE, Postgres + Redis, build, boot, probes),
+      wait for the verdict, comment it on every PR of the window
+   2. acceptance_met == false ──► regression issues labelled `sda-regression`
+   3. every open `sda-regression` issue opened in the last CYCLE_ISSUE_WINDOW_HOURS
+      (default 24) that has no fix in flight ──► one fix session each, on its own VM
+   4. wait for all of them (zero is fine) ──► verdict, PR and ACUs on each issue
+   5. one CYCLE report on the `sda-status` issue ──► fix PRs merge ──► back to 1
 ```
 
 | Name | Trigger | What the orchestrator does |
 |------|---------|----------------------------|
-| **TESTING** — `superset-devin-automation: TESTING (verify every 5th merge, file regressions)` | `github:pull_request` with `action == "closed"`, `pull_request.merged == true`, `repository.full_name == "jhomer192/superset"` | `python -m orchestrator testing --wait --event-json <path>`: count the merge; on every *n*th start **one** verification session that clones Superset, stands up Postgres, builds the frontend, boots the app, runs the committed probes at HEAD *and* at BASE; wait for it; post the verdict on every PR in the window; on failure file **one** `sda-regression` issue. |
-| **AUTOPR** — `superset-devin-automation: AUTOPR (fix session per regression issue + Friday sweep)` | `github:issues` with `action == "labeled"`, `label.name == "sda-regression"`, `repository.full_name == "jhomer192/superset"`; and `schedule:recurring` `FREQ=WEEKLY;BYDAY=FR` | `python -m orchestrator autopr --wait --event-json <path>`: for the issue event, start **one** fix session for that issue if TESTING's `regression_depth` record is on it (an issue a human labelled starts nothing). On the Friday schedule, triage every open `ready` issue and start at most one fix session per eligible issue. Either way, wait for every session it started and post its verdict, PR and ACUs on the issue. |
+| **CYCLE** — `superset-devin-automation: CYCLE (verify every 5th merge, fix regressions, report)` | `github:pull_request` with `action == "closed"`, `pull_request.merged == true`, `repository.full_name == "jhomer192/superset"` | `python -m orchestrator cycle --event-json <path>`: steps 1–5 above (`orchestrator/cycle.py`, wrapping `testing_job.run_testing`, `regression.start_regression_fix` and `autopr_job.publish_fixes`). Issues without TESTING's `regression_depth` record, issues an open PR already closes, and issues whose fix session is still running are skipped and listed in the report. |
+| **AUTOPR** — `superset-devin-automation: AUTOPR (Friday ready-issue sweep)` | `schedule:recurring` `FREQ=WEEKLY;BYDAY=FR` | `python -m orchestrator autopr --wait --event-json <path>`: triage every open `ready` issue, start at most one fix session per eligible issue, wait for all of them and post each verdict, PR and ACUs on its issue. |
 
-The issue event is the hand-off between the two stages. There is no polling between them and no
-custom webhook receiver: GitHub delivers `github:issues` to the Devin app, and the trigger's
-`label.name == "sda-regression"` condition is what keeps AUTOPR from firing on any other issue.
-Each stage publishes its own outcome before it exits, so there is no sweeper and no digest job.
-`register` deletes automations still registered under retired names (MAP, REDUCE, REPORT).
+There is no hand-off between automations and no custom webhook receiver: the merged-PR event
+starts one CYCLE invocation, and that invocation owns verification, fan-out, waiting and the
+report. Each stage publishes its own outcome before it exits, so there is no sweeper and no
+digest job. `register` deletes automations still registered under retired names (MAP, REDUCE,
+REPORT, TESTING and the label-triggered AUTOPR).
 
 The automations are created with `run_as: {"type": "organization"}` and a network policy
 allowing `git-manager.devin.ai`, `github.com`, `api.github.com`, `api.devin.ai` and `pypi.org`. The exact payloads are built in
