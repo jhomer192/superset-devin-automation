@@ -57,6 +57,53 @@ Structured output rules (enforced by schema):
 acceptance_met is the probe's exit code being 0, nothing else.
 """
 
+REGRESSION_FIX_ADDENDUM = """\
+This issue is a regression: the deciding probes passed on master before the PR above merged.
+On top of the playbook workflow:
+- If every deciding probe already exits 0 before you change anything, the regression is gone:
+  report status "no_change_needed" with that evidence and open no PR.
+- Fix the cause, not the symptom.
+- Add or extend a unit test under tests/unit_tests/ that fails without your fix, and run the
+  test file plus its surrounding directory before opening the PR. Evidence must include that
+  test run; the PR body must carry the probe exit codes before and after.
+"""
+
+REGRESSION_FIX_BODY = """\
+Read the issue body first; its acceptance criteria are binding.
+
+Workflow:
+1. Clone the target repository at master and the automation repository next to it. Create a
+   branch. Install requirements/development.txt into a venv. Never push to master.
+2. Reproduce first: run each deciding probe as `probes/run.sh <probe-id>` with SUPERSET_SRC
+   pointing at your checkout and PROBE_PYTHON at the venv python. Every one MUST exit non-zero
+   before you change anything; record those exit codes for base_probe_exit_code. If they all
+   pass, the regression is already gone: report status "no_change_needed" with that evidence and
+   open no PR.
+3. Implement the smallest fix that addresses the cause, not the symptom. Follow AGENTS.md in the
+   target repository (ASF headers, type hints, pre-commit on changed files).
+4. Add or extend a unit test under tests/unit_tests/ that fails without your fix.
+5. Re-run every deciding probe (all MUST exit 0), the test file you touched, and the surrounding
+   unit-test directory. Do not edit anything under the probes/ tree of the automation
+   repository; if a probe is wrong, stop and report status "error".
+6. Only once step 5 is green, open a pull request against the target repository's master whose
+   body contains the line "Closes #{issue_number}", the probe exit codes before and after, and the
+   test command output. PR title in Conventional Commits form. No AI-attribution footers.
+7. Code the fix makes unreachable is deleted in the same PR, never deprecated or left behind a
+   flag. Writing rules for the commit message, PR body and any comments: state what changed and why
+   once, with no summary paragraph or padded lists; no negative parallelism ("not just X, it is
+   Y") or rhetorical mirroring; do not restate rules the codebase already carries; claim only
+   what you ran, and say the scope if it was narrower than the sentence implies.
+
+Structured output rules (enforced by schema):
+- every status: include issue={issue_number}.
+- status "pr_opened": include pr_url, branch, acceptance_met=true, probe_command, probe_exit_code=0,
+  base_probe_exit_code (non-zero), and evidence (probe output at base and head plus the test run).
+- status "no_change_needed": only when the probes already pass before any change; include the same
+  fields.
+- status "error": include error_message only; do NOT include acceptance_met or pr_url.
+acceptance_met is the probe's exit code being 0, nothing else.
+"""
+
 VERIFY_PLAYBOOK_BODY = """\
 You are verifying that the target repository still meets its PRD (PRD.md in that repository)
 after a merge. The prompt gives the target and automation repositories, the HEAD commit, the PR
@@ -128,48 +175,17 @@ def regression_fix_prompt(
     playbook_id: str | None = None,
 ) -> str:
     probe_lines = "\n".join(f"  - {p}" for p in probes)
-    return f"""{_header(target_repo, playbook_id)}
-
+    variables = f"""\
 Fix GitHub issue #{issue_number} in {target_repo}: a probe fails on master after {pr_url} merged.
 
 Issue URL: {issue_url}
 Failing commit: {head_sha}
-Failing probes (deciding; they live in https://github.com/{automation_repo}):
+Automation repository (probes): https://github.com/{automation_repo}
+Deciding probes:
 {probe_lines}
-
-Read the issue body first; its acceptance criteria are binding.
-
-Workflow:
-1. Clone {target_repo} at master and https://github.com/{automation_repo} next to it. Create a
-   branch. Install requirements/development.txt into a venv. Never push to master.
-2. Reproduce first: run each failing probe with SUPERSET_SRC pointing at your checkout and
-   PROBE_PYTHON at the venv python. Every one MUST exit non-zero before you change anything;
-   record those exit codes for base_probe_exit_code. If they all pass, the regression is already
-   gone: report status "no_change_needed" with that evidence and open no PR.
-3. Implement the smallest fix that addresses the cause, not the symptom. Follow AGENTS.md in the
-   superset repo (ASF headers, type hints, pre-commit on changed files).
-4. Add or extend a unit test under superset/tests/unit_tests/ that fails without your fix.
-5. Re-run every failing probe (all MUST exit 0), the test file you touched, and the surrounding
-   unit-test directory so you know the fix broke nothing else. Do not edit anything under the
-   probes/ tree of {automation_repo}; if a probe is wrong, stop and report status "error".
-6. Only once step 5 is green, open a pull request against {target_repo} master whose body
-   contains the line "Closes #{issue_number}", the probe exit codes before and after, and the
-   test command output. PR title in Conventional Commits form. No AI-attribution footers.
-7. Code the fix makes unreachable is deleted in the same PR, never deprecated or left behind a
-   flag. Writing rules for the commit message, PR body and any comments: state what changed and why
-   once, with no summary paragraph or padded lists; no negative parallelism ("not just X, it is
-   Y") or rhetorical mirroring; do not restate rules the codebase already carries; claim only
-   what you ran, and say the scope if it was narrower than the sentence implies.
-
-Structured output rules (enforced by schema):
-- every status: include issue={issue_number}.
-- status "pr_opened": include pr_url, branch, acceptance_met=true, probe_command, probe_exit_code=0,
-  base_probe_exit_code (non-zero), and evidence (probe output at base and head plus the test run).
-- status "no_change_needed": only when the probes already pass before any change; include the same
-  fields.
-- status "error": include error_message only; do NOT include acceptance_met or pr_url.
-acceptance_met is the probe's exit code being 0, nothing else.
 """
+    body = REGRESSION_FIX_ADDENDUM if playbook_id else REGRESSION_FIX_BODY.format(issue_number=issue_number)
+    return f"{_header(target_repo, playbook_id)}\n\n{variables}\n{body}"
 
 
 def verification_command(target_repo: str, head_sha: str, requirements: list[str]) -> str:
