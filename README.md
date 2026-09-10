@@ -225,7 +225,7 @@ session id in its marker, so a replayed event posts nothing twice.
 
 ## Finding new issues (EXPLORE)
 
-Verification only checks what `probes/registry.json` already names. After each verification that
+Verification only checks the requirements `PRD.md` already names. After each verification that
 reached a verdict (pass or fail; not a build error), find-and-fix starts one exploratory session
 (`orchestrator/explore.py`, prompt in `prompts.exploration_prompt`, tagged `sda-explore`) on the
 same merge commit, alongside the fix sessions. That session boots Superset, walks the app as each
@@ -244,9 +244,10 @@ closure files again. One exploration per verified merge: a replayed event finds 
 `exploration_started` record on the PR and reuses that session.
 
 A candidate is not a regression. `fix_recent_regressions` reads `sda-regression` only, so nothing
-fixes or guards a candidate until a human promotes it: save the probe under `probes/issue_<n>/`,
-add the issue and probe to `probes/registry.json`, regenerate `ISSUES.md`, merge. From then on
-`autopr` can start its fix session and every verification guards the probe. `EXPLORE_AFTER_VERIFY=0`
+fixes or guards a candidate until a human promotes it: add a requirement for it to `PRD.md`, save
+the probe under `probes/`, map the requirement to the probe in `probes/registry.json`, merge.
+From then on every verification guards the probe, and labelling the issue `ready` lets `autopr`
+start its fix session. `EXPLORE_AFTER_VERIFY=0`
 turns the tier off; like the cadence values it is baked in at `register`.
 
 ## Probes

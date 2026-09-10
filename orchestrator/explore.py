@@ -1,13 +1,12 @@
 """Exploratory issue finding: the tier that files defects nobody has specified yet.
 
-The verification tier only proves what the registry already names. After a verification has run
+The verification tier only proves the requirements PRD.md already names. After a verification has run
 on a merge, one exploration session boots the same HEAD, walks the app as each SECURITY.md role,
 reads the logs and reports reproduced candidates. The orchestrator files each one as an
 `sda-candidate` issue carrying the reproduction and a proposed probe script.
 
-A candidate is not a regression: nothing fixes it or guards it until a human promotes it (adds
-the probe under probes/ and the issue to probes/registry.json). Agent judgement never reaches the
-fix loop on its own.
+A candidate is not a regression: nothing fixes it or guards it until a human promotes it (a PRD.md
+requirement, a probe under probes/, and the mapping in probes/registry.json).
 """
 
 from __future__ import annotations
@@ -111,11 +110,11 @@ Actual: {candidate["actual"]}
 ## Promotion
 
 This issue is a candidate: the loop neither fixes nor guards it until a human promotes it. To
-promote, in https://github.com/{automation_repo}: save the probe as
-`probes/issue_<n>/probe_<name>.sh`, add this issue with that probe to `probes/registry.json`,
-run `python verify/gen_issues_md.py`, and open a PR. Once merged, `python -m orchestrator autopr`
-starts the fix session and every later verification guards the probe. Close the issue as not
-planned if the candidate does not hold up.
+promote: add a requirement for it to `PRD.md` in {target_repo}; in https://github.com/{automation_repo}
+save the probe under `probes/` and map the requirement to it in `probes/registry.json`; open a PR.
+Once merged, every later verification guards the probe, and the `ready` label lets
+`python -m orchestrator autopr` start the fix session. Close the issue as not planned if the
+candidate does not hold up.
 """
 
 
