@@ -1,6 +1,6 @@
 """CLI: python -m orchestrator SUBCOMMAND [--simulate]
 
-Subcommands: testing, autopr, register, register-playbooks, simulate.
+Subcommands: cycle, testing, autopr, register, register-playbooks, simulate.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from typing import Any
 from . import automations, playbooks
 from .autopr_job import run_autopr
 from .config import Settings, load_settings
+from .cycle import run_cycle
 from .devin_api import DevinClient, LiveDevinClient
 from .github_api import GitHubClient, LiveGitHubClient
 from .registry import Registry, load_registry
@@ -93,6 +94,34 @@ def cmd_testing(
     ).as_dict()
 
 
+def cmd_cycle(
+    settings: Settings,
+    devin: DevinClient,
+    gh: GitHubClient,
+    registry: Registry,
+    event_json: Path | None,
+    event: dict[str, Any] | None = None,
+    sleep: Callable[[float], None] | None = None,
+) -> dict[str, Any]:
+    if event_json is None and event is None and not settings.simulate:
+        raise SystemExit("cycle requires --event-json <path> unless --simulate")
+    event = event if event is not None else load_event(event_json)
+    kwargs: dict[str, Any] = {"sleep": sleep} if sleep is not None else {}
+    return run_cycle(
+        devin=devin,
+        gh=gh,
+        registry=registry,
+        target_repo=settings.target_repo,
+        automation_repo=settings.automation_repo,
+        event=event,
+        verify_branch=settings.verify_branch,
+        every_n=settings.verify_every_n_merges,
+        issue_window_hours=settings.cycle_issue_window_hours,
+        playbook_id=settings.playbook_id_verify,
+        **kwargs,
+    ).as_dict()
+
+
 def cmd_register(settings: Settings, devin: DevinClient, dry_run: bool) -> list[dict[str, Any]]:
     return automations.register(
         devin,
@@ -100,6 +129,7 @@ def cmd_register(settings: Settings, devin: DevinClient, dry_run: bool) -> list[
         settings.automation_repo,
         verify_branch=settings.verify_branch,
         every_n=settings.verify_every_n_merges,
+        issue_window_hours=settings.cycle_issue_window_hours,
         playbook_id_fix=settings.playbook_id_fix,
         playbook_id_verify=settings.playbook_id_verify,
         dry_run=dry_run,
@@ -253,7 +283,12 @@ def main(argv: list[str] | None = None) -> int:
     p_testing.add_argument(
         "--wait", action="store_true", help="block until the verdict, publish it, file the regression"
     )
-    p_reg = sub.add_parser("register", help="create/update the TESTING and AUTOPR automations")
+    p_cycle = sub.add_parser(
+        "cycle",
+        help="merged-PR event: verify, fix every recent regression issue, wait for all, report",
+    )
+    p_cycle.add_argument("--event-json", type=Path, default=None)
+    p_reg = sub.add_parser("register", help="create/update the CYCLE and AUTOPR automations")
     p_reg.add_argument("--dry-run", action="store_true")
     p_pb = sub.add_parser(
         "register-playbooks", help="create/update the remediation and verification playbooks"
@@ -276,7 +311,9 @@ def main(argv: list[str] | None = None) -> int:
         if registering and not args.dry_run and settings.simulate:
             raise SystemExit(f"{args.command} without --dry-run needs live credentials")
         devin, gh = _clients(settings) if not (registering and args.dry_run) else (FakeDevin(), FakeGitHub())
-        if args.command == "autopr":
+        if args.command == "cycle":
+            result = cmd_cycle(settings, devin, gh, registry, args.event_json)
+        elif args.command == "autopr":
             result = cmd_autopr(settings, devin, gh, registry, args.event_json, wait=args.wait)
         elif args.command == "testing":
             result = cmd_testing(settings, devin, gh, registry, args.event_json, wait=args.wait)

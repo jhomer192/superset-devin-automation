@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -235,6 +236,7 @@ class FakeGitHub:
             "state": "open",
             "labels": [{"name": name} for name in labels],
             "html_url": f"https://github.com/{repo}/issues/{number}",
+            "created_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
         return dict(self.issues[number])
 

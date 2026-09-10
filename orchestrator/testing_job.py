@@ -133,18 +133,6 @@ def run_testing(
     if find(entries, "merge_counted", key=key):
         report.skipped_reason = f"merge already counted for {key}"
         return report
-    for entry in reversed(find(entries, "verification_started", key=key)):
-        session_id = str(entry.data.get("session_id", ""))
-        session = devin.get_session(session_id) if session_id else {}
-        if session and holds_slot(session.get("status"), session.get("status_detail")):
-            report.skipped_reason = f"verification {session_id} already in flight for {key}"
-            report.session_id = session_id
-            return report
-        if session and session.get("structured_output"):
-            report.skipped_reason = f"verification {session_id} already completed for {key}"
-            report.session_id = session_id
-            return report
-
     merged = gh.list_merged_pulls(target_repo, verify_branch)
     k, window = merge_window(merged, number, every_n)
     report.merge_index = k
@@ -166,6 +154,26 @@ def run_testing(
     parents = gh.get_commit_parents(target_repo, str(oldest["merge_commit_sha"]))
     base_sha = parents[0] if parents else str((oldest.get("base") or {}).get("sha") or "")
     report.base_sha = base_sha or None
+
+    for entry in reversed(find(entries, "verification_started", key=key)):
+        session_id = str(entry.data.get("session_id", ""))
+        session = devin.get_session(session_id) if session_id else {}
+        if not session:
+            continue
+        report.session_id = session_id
+        if session.get("structured_output"):
+            state = "completed"
+        elif holds_slot(session.get("status"), session.get("status_detail")):
+            state = "in flight"
+        else:
+            state = "finished without a result"
+        if not wait:
+            report.skipped_reason = f"verification {session_id} already {state} for {key}"
+            return report
+        # A replay with --wait picks the earlier session back up: publication is idempotent per
+        # session, so an invocation that died mid-wait loses nothing.
+        log.info("TESTING: %s already %s for %s, waiting on it", session_id, state, key)
+        return _finish(devin, gh, ledger, target_repo, automation_repo, report, session_id, sleep)
 
     closes: list[int] = []
     for wpr in window:
@@ -234,7 +242,22 @@ def run_testing(
     log.info("TESTING: %s -> session %s", key, session_id)
     if not wait:
         return report
+    return _finish(devin, gh, ledger, target_repo, automation_repo, report, session_id, sleep)
 
+
+def _finish(
+    devin: DevinClient,
+    gh: GitHubClient,
+    ledger: IssueLedger,
+    target_repo: str,
+    automation_repo: str,
+    report: TestingReport,
+    session_id: str,
+    sleep: Callable[[float], None],
+) -> TestingReport:
+    """Wait for the verification, publish its verdict to the window, log the run."""
+    head_sha = report.merge_commit_sha
+    base_sha = report.base_sha or ""
     finished = wait_until_finished(devin, session_id, sleep)
     report.verdict = verdict(finished.get("structured_output"))
     acu_cache: dict[str, float] = {}
