@@ -19,7 +19,14 @@ from typing import Any
 from .devin_api import DevinClient
 from .github_api import GitHubClient
 from .ledger import IssueLedger, LedgerEntry, find
-from .regression import MAX_CHAIN_DEPTH, chain_depth, file_regression_issue
+from .regression import (
+    MAX_CHAIN_DEPTH,
+    REGRESSION_LABEL,
+    chain_depth,
+    failures,
+    file_regression_issue,
+    regression_record,
+)
 
 log = logging.getLogger(__name__)
 
@@ -177,6 +184,24 @@ def existing_regression_issue(gh: GitHubClient, target_repo: str, session_id: st
     return None
 
 
+def open_regression_issue_for_probes(
+    gh: GitHubClient, ledger: IssueLedger, target_repo: str, probes: list[str]
+) -> int | None:
+    """The open `sda-regression` issue whose `regression_depth` record names exactly these probes.
+
+    Closed issues do not count: a closed regression is believed fixed, so a failure on the same
+    probes after that is a new one.
+    """
+    for issue in gh.list_issues(target_repo, REGRESSION_LABEL):
+        number = int(issue["number"])
+        record = regression_record(ledger.read(number))
+        if record is None:
+            continue
+        if sorted(str(p) for p in record.data.get("probes") or []) == probes:
+            return number
+    return None
+
+
 def remediate(
     *,
     gh: GitHubClient,
@@ -209,6 +234,32 @@ def remediate(
             LedgerEntry("regression_filed", data={"session_id": session_id, "issue": existing}),
             [f"#{existing} already covers this verification"],
         )
+        return None
+    probes = sorted(f.probe for f in failures(session["structured_output"]))
+    tracking = open_regression_issue_for_probes(gh, ledger, target_repo, probes)
+    if tracking is not None:
+        session_url = str(session.get("url") or session_id)
+        window = ", ".join(f"#{n}" for n in scope.window_prs)
+        ledger.append(
+            pr_number,
+            "Regression already tracked",
+            LedgerEntry(
+                "regression_filed",
+                data={
+                    "session_id": session_id,
+                    "issue": tracking,
+                    "adopted": True,
+                    "window": list(scope.window_prs),
+                },
+            ),
+            [f"#{tracking} already tracks these probes; not filing a duplicate"],
+        )
+        gh.create_issue_comment(
+            target_repo,
+            tracking,
+            f"Reproduced by verification {session_url} (window {window}, head `{scope.head_sha}`).",
+        )
+        log.info("regression #%d adopted for session %s", tracking, session_id)
         return None
     pr_url = f"https://github.com/{target_repo}/pull/{pr_number}"
     # any merge in the window may be the cause, so the chain is as deep as its deepest member
@@ -255,7 +306,7 @@ def remediate(
             f"issue: {filed['issue_url']}",
             f"failing probes: {', '.join(filed['probes'])}",
             f"window: {', '.join(f'#{n}' for n in scope.window_prs)}",
-            "the issue's `sda-regression` label starts the AUTOPR fix session",
+            "the next `superset issue finder and fixer` run starts the fix session for this issue",
         ],
     )
     return {"pr": pr_number, **filed}

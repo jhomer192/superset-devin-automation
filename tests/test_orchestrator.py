@@ -810,6 +810,8 @@ def test_a_regression_chain_stops_after_two_automated_attempts(registry, world):
     # The fix for that issue lands and regresses again, twice.
     depths = []
     for pr_number in (101, 102):
+        # GitHub closes the issue when the PR that `Closes` it merges
+        gh.close_completed(issue)
         pr = gh.merge(
             pr_number,
             branch="master",
@@ -878,6 +880,63 @@ def test_a_regression_already_filed_by_a_replayed_run_is_adopted_not_duplicated(
     assert filed is None and set(gh.issues) == issues_before
     adopted = find(IssueLedger(gh, REPO).read(14), "regression_filed", session_id=session_id)
     assert adopted and adopted[-1].data["issue"] == other["number"]
+
+
+def publish_failed_session(devin, gh, session_id, probes):
+    """Publish a fresh failed verification of PR 14 whose failing probe set is `probes`."""
+    base = next(s for s in devin.sessions.values() if "sda-verify" in s["tags"])
+    output = copy.deepcopy(base["structured_output"])
+    output["results"] = [{**output["results"][0], "probe": p} for p in probes]
+    session = {**base, "session_id": session_id, "url": f"https://app.devin.ai/sessions/{session_id}"}
+    session["structured_output"] = output
+    return publish_verification(
+        devin=devin,
+        gh=gh,
+        ledger=IssueLedger(gh, REPO),
+        target_repo=REPO,
+        automation_repo=AUTO,
+        session=session,
+        threads=[14],
+        acu_cache={},
+    )
+
+
+def test_remediate_adopts_open_regression_issue_with_same_probes(registry, world):
+    devin, gh = world
+    issue = fail_verification(devin, gh, registry).regression_filed["issue"]
+    assert find(IssueLedger(gh, REPO).read(issue), "regression_depth")[-1].data["probes"] == ["issue_5/unit"]
+    issues_before = set(gh.issues)
+    comments_before = len(gh.comments[issue])
+
+    _, filed = publish_failed_session(devin, gh, "verify-again", ["issue_5/unit"])
+    assert filed is None and set(gh.issues) == issues_before
+    adopted = find(IssueLedger(gh, REPO).read(14), "regression_filed", session_id="verify-again")
+    assert len(adopted) == 1 and adopted[0].data["issue"] == issue and adopted[0].data["adopted"] is True
+    assert f"#{issue} already tracks these probes" in gh.comments[14][-1]["body"]
+    assert len(gh.comments[issue]) == comments_before + 1
+    assert "verify-again" in gh.comments[issue][-1]["body"]
+
+
+def test_remediate_files_when_probe_set_differs(registry, world):
+    devin, gh = world
+    issue = fail_verification(devin, gh, registry).regression_filed["issue"]
+    issues_before = set(gh.issues)
+
+    _, filed = publish_failed_session(devin, gh, "verify-wider", ["issue_5/unit", "issue_3/http"])
+    assert filed and filed["issue"] not in issues_before and filed["issue"] != issue
+    assert filed["probes"] == ["issue_5/unit", "issue_3/http"]
+
+
+def test_remediate_ignores_closed_regression_issues(registry, world):
+    devin, gh = world
+    issue = fail_verification(devin, gh, registry).regression_filed["issue"]
+    gh.issues[issue]["state"] = "closed"
+    issues_before = set(gh.issues)
+
+    _, filed = publish_failed_session(devin, gh, "verify-after-close", ["issue_5/unit"])
+    assert filed and filed["issue"] not in issues_before
+    entries = find(IssueLedger(gh, REPO).read(14), "regression_filed", session_id="verify-after-close")
+    assert len(entries) == 1 and "adopted" not in entries[0].data
 
 
 def test_an_errored_verification_is_reported_but_not_filed_as_a_regression(registry, world):
