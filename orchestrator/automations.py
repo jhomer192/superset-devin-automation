@@ -39,9 +39,9 @@ issues yourself; the orchestrator does that.
 1. git clone https://github.com/{automation_repo} && cd superset-devin-automation
 2. python -m pip install -e .
 3. Credentials: the org session secrets `superset_remediation_bot` (Devin API key) and
-   `superset_github_key` (GitHub token) are already environment variables; the orchestrator reads
-   them by those names (either case) and has the org id built in. Do not look for other names; if
-   one of the two is missing, run the command anyway and report its error verbatim.
+   `superset_github` (GitHub token) are already environment variables; the orchestrator reads them
+   by those names (either case) and has the org id built in. Do not look for other names; if one of
+   the two is missing, run the command anyway and report its error verbatim.
 4. Run: {command}
 5. Report the command's JSON output verbatim and exit. Do not open PRs, do not edit code.
 """

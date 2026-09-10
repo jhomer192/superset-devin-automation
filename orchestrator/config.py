@@ -70,7 +70,7 @@ def load_settings(simulate: bool = False) -> Settings:
         # the second names are the Devin secret names this loop is provisioned with
         devin_api_key=_first(env, "DEVIN_API_KEY", "superset_remediation_bot", "SUPERSET_REMEDIATION_BOT"),
         devin_org_id=env.get("DEVIN_ORG_ID", "") or DEFAULT_ORG_ID,
-        github_token=_first(env, "GITHUB_TOKEN", "superset_github_key", "SUPERSET_GITHUB_KEY"),
+        github_token=_first(env, "GITHUB_TOKEN", "superset_github", "SUPERSET_GITHUB", "superset_github_key"),
         target_repo=env.get("TARGET_REPO", "jhomer192/superset"),
         automation_repo=env.get("AUTOMATION_REPO", "jhomer192/superset-devin-automation"),
         ready_label=env.get("READY_LABEL", "ready"),
