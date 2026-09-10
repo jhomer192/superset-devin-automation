@@ -74,18 +74,6 @@ def holds_slot(status: str | None, status_detail: str | None) -> bool:
     return not is_finished(status, status_detail)
 
 
-def session_liveness(session: dict[str, Any]) -> Liveness:
-    return classify(session.get("status"), session.get("status_detail"))
-
-
-def merged_pr_urls(session: dict[str, Any]) -> list[str]:
-    return [
-        pr["pr_url"]
-        for pr in session.get("pull_requests") or []
-        if str(pr.get("pr_state") or "").lower() == "merged"
-    ]
-
-
 def wait_until_finished(
     devin: DevinClient, session_id: str, sleep: Callable[[float], None] = time.sleep
 ) -> dict[str, Any]:

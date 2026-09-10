@@ -56,15 +56,6 @@ class FakeDevin:
     def get_session(self, session_id: str) -> JSON:
         return dict(self.sessions[session_id])
 
-    def list_sessions(self, **params: Any) -> list[JSON]:
-        origins = params.get("origins")
-        tags = {str(t) for t in params.get("tags") or []}
-        return [
-            dict(s)
-            for s in self.sessions.values()
-            if (not origins or s["origin"] == origins) and (not tags or tags & set(s["tags"]))
-        ]
-
     def list_automations(self) -> list[JSON]:
         return [dict(a) for a in self.automations.values()]
 

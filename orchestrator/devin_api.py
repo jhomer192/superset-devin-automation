@@ -15,16 +15,11 @@ log = logging.getLogger(__name__)
 
 JSON = dict[str, Any]
 
-# SessionsQueryParams.first: minimum 1, maximum 200.
-MAX_PAGE = 200
-
 
 class DevinClient(Protocol):
     def create_session(self, body: JSON) -> JSON: ...
 
     def get_session(self, session_id: str) -> JSON: ...
-
-    def list_sessions(self, **params: Any) -> list[JSON]: ...
 
     def list_automations(self) -> list[JSON]: ...
 
@@ -73,27 +68,6 @@ class LiveDevinClient:
                     return list(payload[key])
         return []
 
-    def _paginate(self, path: str, params: dict[str, Any]) -> list[JSON]:
-        """Read every page of a PaginatedResponse by following `end_cursor` into `after`.
-
-        A single page holds at most `first` items, so a caller that reads one page silently
-        loses everything past it once the window grows beyond that.
-        """
-        query = dict(params)
-        query.setdefault("first", MAX_PAGE)
-        out: list[JSON] = []
-        seen: set[str] = set()
-        while True:
-            payload = self._get(path, query)
-            out.extend(self._items(payload))
-            if not isinstance(payload, dict) or not payload.get("has_next_page"):
-                return out
-            cursor = str(payload.get("end_cursor") or "")
-            if not cursor or cursor in seen:
-                return out
-            seen.add(cursor)
-            query["after"] = cursor
-
     # POST /v3/organizations/{org_id}/sessions
     def create_session(self, body: JSON) -> JSON:
         result: JSON = self._post("/sessions", body)
@@ -103,10 +77,6 @@ class LiveDevinClient:
     def get_session(self, session_id: str) -> JSON:
         result: JSON = self._get(f"/sessions/{session_id}")
         return result
-
-    # GET /v3/organizations/{org_id}/sessions  (SessionsQueryParams, flattened into the query)
-    def list_sessions(self, **params: Any) -> list[JSON]:
-        return self._paginate("/sessions", params)
 
     # GET /v3/organizations/{org_id}/automations
     def list_automations(self) -> list[JSON]:

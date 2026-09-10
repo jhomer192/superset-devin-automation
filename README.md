@@ -241,7 +241,7 @@ Every v3 endpoint this loop calls, all under `/v3/organizations/{org_id}` (`orch
 
 | Endpoint | Used for |
 |----------|----------|
-| `POST /sessions`, `GET /sessions/{id}`, `GET /sessions` | start fix/verification sessions, dedup on live sessions |
+| `POST /sessions`, `GET /sessions/{id}` | start fix/verification sessions, wait for them, dedup on live sessions |
 | `GET /automations`, `POST /automations`, `PATCH /automations/{id}`, `DELETE /automations/{id}` | `register` (idempotent by name; deletes the retired MAP/REDUCE registrations) |
 | `GET /playbooks`, `POST /playbooks`, `PUT /playbooks/{id}` | `register-playbooks` (idempotent by title); payload is `PlaybookCreateRequest` |
 | `GET /consumption/daily/sessions/{id}` | ACUs on every verdict comment |
