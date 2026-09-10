@@ -167,17 +167,15 @@ def _outcome(kind: str, outcome: str, pr_url: str | None, issue: int) -> JSON:
     return {
         "status": "ok",
         "acceptance_met": met,
-        "probe_command": "verify/run_all.sh --head <sha> --base <sha> --issues 5",
+        "probe_command": "verify/run_all.sh --head <sha> --requirements PRD-SQL-1",
         "probe_exit_code": 0 if met else 1,
         "evidence": "simulated run_all.sh result",
         "head_sha": head,
-        "base_sha": "fc110d8428f35249a2092778ca0a3e26a2de0b14",
         "results": [
             {
                 "issue": issue,
                 "probe": f"issue_{issue}/unit",
                 "kind": "offline_pytest",
-                "base_exit_code": 1,
                 "head_exit_code": 0 if met else 1,
                 "acceptance_met": met,
                 "evidence": "simulated pytest summary",

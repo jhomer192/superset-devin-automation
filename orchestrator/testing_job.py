@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .devin_api import DevinClient
-from .github_api import GitHubClient, closing_issue_numbers
+from .github_api import GitHubClient
 from .ledger import IssueLedger, LedgerEntry, find
 from .prompts import verification_prompt
 from .publish import TRIGGER_TAG_PREFIX, publish_verification, session_acus, verdict
@@ -43,9 +43,7 @@ class NotAMergedPR(ValueError):
 class TestingReport:
     pr_url: str
     merge_commit_sha: str
-    base_sha: str | None = None
-    closes: list[int] = field(default_factory=list)
-    regression_issues: list[int] = field(default_factory=list)
+    requirements: list[str] = field(default_factory=list)
     session_id: str | None = None
     skipped_reason: str | None = None
     merge_index: int | None = None
@@ -94,20 +92,6 @@ def merge_window(merged: list[dict[str, Any]], number: int, every_n: int) -> tup
     if k % every_n != 0:
         return k, []
     return k, merged[k - every_n : k]
-
-
-def regression_issue_numbers(
-    gh: GitHubClient, registry: Registry, target_repo: str, exclude: set[int]
-) -> list[int]:
-    """Issues whose fixes already landed: their probes guard against regressions at HEAD."""
-    out: list[int] = []
-    for spec in registry.issues:
-        if spec.number in exclude or not spec.probes:
-            continue
-        issue = gh.get_issue(target_repo, spec.number)
-        if issue.get("state") == "closed" and issue.get("state_reason") == "completed":
-            out.append(spec.number)
-    return out
 
 
 def run_testing(
@@ -162,11 +146,6 @@ def run_testing(
         return report
     report.window_prs = [int(p["number"]) for p in window]
 
-    oldest = window[0]
-    parents = gh.get_commit_parents(target_repo, str(oldest["merge_commit_sha"]))
-    base_sha = parents[0] if parents else str((oldest.get("base") or {}).get("sha") or "")
-    report.base_sha = base_sha or None
-
     for entry in reversed(find(entries, "verification_started", key=key)):
         session_id = str(entry.data.get("session_id", ""))
         session = devin.get_session(session_id) if session_id else {}
@@ -187,35 +166,15 @@ def run_testing(
         log.info("TESTING: %s already %s for %s, waiting on it", session_id, state, key)
         return _finish(devin, gh, ledger, target_repo, automation_repo, report, session_id, sleep)
 
-    closes: list[int] = []
-    for wpr in window:
-        text = f"{wpr.get('title', '')}\n{wpr.get('body', '')}"
-        closes.extend(n for n in closing_issue_numbers(text, target_repo) if n not in closes)
-    report.closes = closes
-    regression = regression_issue_numbers(gh, registry, target_repo, set(closes))
-    report.regression_issues = regression
-
-    probes: list[Probe] = registry.probes_for(closes)
-    regression_probes: list[Probe] = registry.probes_for(regression)
+    requirements = registry.requirement_ids()
+    report.requirements = requirements
+    probes: list[Probe] = [p for _, p in registry.requirement_probes(requirements)]
 
     if not playbook_id:
         log.warning("TESTING: PLAYBOOK_ID_VERIFY unset, using the fully inline verification prompt")
     prompt = verification_prompt(
-        target_repo,
-        automation_repo,
-        head_sha,
-        base_sha,
-        pr_url,
-        closes,
-        probes + regression_probes,
-        playbook_id,
+        target_repo, automation_repo, head_sha, pr_url, requirements, probes, playbook_id
     )
-    if regression:
-        prompt += (
-            "\nRegression guards (already-landed fixes, must pass at HEAD; BASE result is recorded "
-            "but not required to fail): pass them with "
-            f'--regression "{",".join(str(n) for n in regression)}".\n'
-        )
     session = devin.create_session(
         {
             "prompt": prompt,
@@ -231,24 +190,23 @@ def run_testing(
     report.session_id = session_id
     ledger.append(
         number,
-        "Regression verification session started",
+        "PRD verification session started",
         LedgerEntry(
             "verification_started",
             data={
                 "key": key,
                 "session_id": session_id,
                 "head": head_sha,
-                "base": base_sha,
                 "window": list(report.window_prs),
+                "requirements": requirements,
             },
         ),
         [
             f"session: `{session_id}`" + (f" ({session['url']})" if session.get("url") else ""),
-            f"head `{head_sha}` vs base `{base_sha}`",
+            f"head `{head_sha}`",
             f"window: merges {k - every_n + 1}..{k} into `{verify_branch}` "
             f"({', '.join(f'#{p}' for p in report.window_prs)})",
-            f"closes: {', '.join(f'#{n}' for n in closes) or 'none'}",
-            f"regression guards: {', '.join(f'#{n}' for n in regression) or 'none'}",
+            f"PRD requirements checked at HEAD: {', '.join(requirements) or 'none'}",
         ],
     )
     log.info("TESTING: %s -> session %s", key, session_id)
@@ -269,7 +227,6 @@ def _finish(
 ) -> TestingReport:
     """Wait for the verification, publish its verdict to the window, log the run."""
     head_sha = report.merge_commit_sha
-    base_sha = report.base_sha or ""
     finished = wait_until_finished(devin, session_id, sleep)
     report.verdict = verdict(finished.get("structured_output"))
     acu_cache: dict[str, float] = {}
@@ -294,13 +251,11 @@ def _finish(
         f"TESTING: merge #{report.merge_index} verified: {report.verdict}",
         {
             "head_sha": head_sha,
-            "base_sha": base_sha,
             "window": list(report.window_prs),
             "verdict": report.verdict,
             "regression_issue": (filed or {}).get("issue"),
         },
         testing_lines(
-            base_sha=base_sha,
             head_sha=head_sha,
             window_prs=list(report.window_prs),
             merge_index=report.merge_index,
