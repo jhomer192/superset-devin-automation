@@ -1,6 +1,92 @@
 {
   "repo": "jhomer192/superset",
   "baseline_sha": "fc110d8428f35249a2092778ca0a3e26a2de0b14",
+  "prd": {
+    "path": "PRD.md",
+    "requirements": [
+      {
+        "id": "PRD-SEC-1",
+        "title": "Cookie security invariants are enforced at startup",
+        "probes": [
+          "issue_1/unit",
+          "issue_1/startup_log"
+        ]
+      },
+      {
+        "id": "PRD-SEC-2",
+        "title": "Unauthenticated API access is rejected",
+        "probes": [
+          "prd/api_requires_auth"
+        ]
+      },
+      {
+        "id": "PRD-SEC-3",
+        "title": "SVG uploads are sanitised idempotently",
+        "probes": [
+          "issue_9/unit"
+        ]
+      },
+      {
+        "id": "PRD-AUTH-1",
+        "title": "Database login issues a bearer token",
+        "probes": [
+          "prd/login_bearer_token"
+        ]
+      },
+      {
+        "id": "PRD-SQL-1",
+        "title": "KQL statement splitting preserves text before multiline strings",
+        "probes": [
+          "issue_5/unit"
+        ]
+      },
+      {
+        "id": "PRD-SQL-2",
+        "title": "Streaming export chunk size is configured once",
+        "probes": [
+          "issue_3/unit"
+        ]
+      },
+      {
+        "id": "PRD-CHART-1",
+        "title": "Chart history versioning keeps one record per save",
+        "probes": [
+          "issue_11/unit"
+        ]
+      },
+      {
+        "id": "PRD-CHART-2",
+        "title": "Custom-tag filters do not corrupt the rison query",
+        "probes": [
+          "issue_7/unit"
+        ]
+      },
+      {
+        "id": "PRD-OPS-1",
+        "title": "Health endpoint",
+        "probes": [
+          "prd/health"
+        ]
+      }
+    ]
+  },
+  "probes": [
+    {
+      "id": "prd/health",
+      "kind": "live_http",
+      "script": "probes/prd/probe_health.sh"
+    },
+    {
+      "id": "prd/api_requires_auth",
+      "kind": "live_http",
+      "script": "probes/prd/probe_api_requires_auth.sh"
+    },
+    {
+      "id": "prd/login_bearer_token",
+      "kind": "live_http",
+      "script": "probes/prd/probe_login_bearer_token.sh"
+    }
+  ],
   "issues": [
     {
       "number": 1,

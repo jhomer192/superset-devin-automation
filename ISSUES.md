@@ -22,3 +22,20 @@ happens to fix them is still detected.
 | [11](https://github.com/jhomer192/superset/issues/11) | versioning/diff.py drops and fabricates chart-history records when two adhoc filters share a column | open | correctness | superset/versioning/diff.py:425-430 (_diff_list_by_natural_key) indexes from_list/to_list by key with no collision handling; _filter_key at :481-490 keys adhoc filters by subject alone | `issue_11/unit` (offline_pytest) → `probes/issue_11/probe_unit.sh` | [PR](https://github.com/jhomer192/superset/pull/20) (open) |
 | [12](https://github.com/jhomer192/superset/issues/12) | nx pins brace-expansion 5.0.8 (GHSA-rgw5-rvv9-x895); the minimatch override has the wrong parent and a stale floor | open | dependency | superset-frontend/package-lock.json node_modules/nx/node_modules/brace-expansion resolves 5.0.8 via nx@23.1.1's exact pin; superset-frontend/package.json:424-426 override minimatch@>=10 -> brace-expansion >=5.0.8 has the wrong parent and admits the vulnerable version | `issue_12/lockfile` (offline_static) → `probes/issue_12/probe_lockfile.sh` | open; an AUTOPR sweep starts a fix session |
 | [15](https://github.com/jhomer192/superset/issues/15) | nx pins brace-expansion 5.0.8 (GHSA-rgw5-rvv9-x895); the minimatch override has the wrong parent and a stale floor | open | dependency | Duplicate of #12: superset-frontend/package-lock.json node_modules/nx/node_modules/brace-expansion resolves 5.0.8 via nx@23.1.1's exact pin; superset-frontend/package.json:424-426 minimatch@>=10 override has the wrong parent and a >=5.0.8 floor | `issue_12/lockfile` (offline_static) → `probes/issue_12/probe_lockfile.sh` | [PR](https://github.com/jhomer192/superset/pull/17) (open) |
+
+## PRD requirements
+
+Requirements from `PRD.md` in `jhomer192/superset`. Every one is guarded at HEAD on
+every verification; a failing probe files a regression issue naming the requirement id.
+
+| Requirement | Title | Probes |
+|-------------|-------|--------|
+| PRD-SEC-1 | Cookie security invariants are enforced at startup | `issue_1/unit`<br>`issue_1/startup_log` |
+| PRD-SEC-2 | Unauthenticated API access is rejected | `prd/api_requires_auth` |
+| PRD-SEC-3 | SVG uploads are sanitised idempotently | `issue_9/unit` |
+| PRD-AUTH-1 | Database login issues a bearer token | `prd/login_bearer_token` |
+| PRD-SQL-1 | KQL statement splitting preserves text before multiline strings | `issue_5/unit` |
+| PRD-SQL-2 | Streaming export chunk size is configured once | `issue_3/unit` |
+| PRD-CHART-1 | Chart history versioning keeps one record per save | `issue_11/unit` |
+| PRD-CHART-2 | Custom-tag filters do not corrupt the rison query | `issue_7/unit` |
+| PRD-OPS-1 | Health endpoint | `prd/health` |

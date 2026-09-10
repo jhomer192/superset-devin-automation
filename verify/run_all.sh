@@ -2,7 +2,8 @@
 # Full regression verification, meant to run on a Devin VM (or any Linux box with docker,
 # node >= 20 and python >= 3.11).
 #
-#   verify/run_all.sh --head <sha> --base <sha> --issues 5,7 [--regression 1,3] [--repo jhomer192/superset]
+#   verify/run_all.sh --head <sha> --base <sha> --issues 5,7 [--regression 1,3] \
+#                     [--requirements PRD-SEC-1,PRD-OPS-1] [--repo jhomer192/superset]
 #
 # Steps, in order (each is a stage; the JSON result records which stage failed):
 #   1. clone the target repo twice: HEAD (merged commit) and BASE (its first parent)
@@ -12,6 +13,7 @@
 #      (HEAD on :8088, BASE on :8089), wait for /health, run every probe against THAT app
 #   5. probes for --issues must pass at HEAD and fail at BASE
 #      run every probe for --regression at HEAD (must pass); BASE result recorded only
+#      run every probe of the PRD requirements in --requirements at HEAD (must pass)
 #   6. write verify/out/result.json matching orchestrator.schema.VERIFICATION_SCHEMA and exit
 #      0 iff every acceptance condition held.
 #
@@ -21,7 +23,7 @@ set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "${here}/.." && pwd)"
 REPO="jhomer192/superset"
-HEAD_SHA=""; BASE_SHA=""; ISSUES=""; REGRESSION=""
+HEAD_SHA=""; BASE_SHA=""; ISSUES=""; REGRESSION=""; REQUIREMENTS=""
 WORK="${SDA_WORKDIR:-${root}/verify/work}"
 OUT="${root}/verify/out"
 PG_PORT="${SDA_PG_PORT:-55432}"
@@ -34,6 +36,7 @@ while [[ $# -gt 0 ]]; do
     --base) BASE_SHA="$2"; shift 2 ;;
     --issues) ISSUES="$2"; shift 2 ;;
     --regression) REGRESSION="$2"; shift 2 ;;
+    --requirements) REQUIREMENTS="$2"; shift 2 ;;
     --repo) REPO="$2"; shift 2 ;;
     *) echo "unknown arg $1" >&2; exit 2 ;;
   esac
@@ -122,7 +125,8 @@ export SUPERSET_CONFIG_PATH="${WORK}/superset_config.py"
 export SUPERSET_ADMIN_USER=admin SUPERSET_ADMIN_PASSWORD=admin
 PROBE_RESULTS="${OUT}/probes.jsonl"; : >"${PROBE_RESULTS}"
 PROBE_LIST="${OUT}/probes.tsv"
-python3 "${here}/list_probes.py" --issues "${ISSUES}" --regression "${REGRESSION}" >"${PROBE_LIST}"
+python3 "${here}/list_probes.py" --issues "${ISSUES}" --regression "${REGRESSION}" \
+  --requirements "${REQUIREMENTS}" >"${PROBE_LIST}"
 
 boot_app() {  # <checkout> <role> <port> -- own database per role; sets SUPERSET_URL and GUNICORN_PID
   local src="$1" role="$2" port="$3"
@@ -186,4 +190,4 @@ SUPERSET_URL="${HEAD_URL}"
 # ---- 6. verdict -------------------------------------------------------------------------
 stage verdict
 python3 "${here}/collect.py" --probes "${PROBE_RESULTS}" --issues "${ISSUES}" --regression "${REGRESSION}" \
-  --head "${HEAD_SHA}" --base "${BASE_SHA}" --health-url "${SUPERSET_URL}/health" --out "${OUT}/result.json"
+  --requirements "${REQUIREMENTS}" --head "${HEAD_SHA}" --base "${BASE_SHA}" --health-url "${SUPERSET_URL}/health" --out "${OUT}/result.json"

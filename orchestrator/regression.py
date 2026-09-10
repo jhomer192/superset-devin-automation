@@ -50,6 +50,7 @@ class Failure:
     head_exit_code: int | None
     base_exit_code: int | None
     evidence: str
+    requirements: tuple[str, ...] = ()
 
 
 def failures(output: dict[str, Any]) -> list[Failure]:
@@ -62,6 +63,7 @@ def failures(output: dict[str, Any]) -> list[Failure]:
             head_exit_code=r.get("head_exit_code"),
             base_exit_code=r.get("base_exit_code"),
             evidence=str(r.get("evidence") or ""),
+            requirements=tuple(str(x) for x in r.get("requirements") or []),
         )
         for r in results
         if not r.get("acceptance_met")
@@ -83,6 +85,9 @@ def failures(output: dict[str, Any]) -> list[Failure]:
 def issue_title(pr_number: int, items: list[Failure]) -> str:
     first = items[0].probe.split()[0]
     more = f" (+{len(items) - 1} more)" if len(items) > 1 else ""
+    reqs = sorted({r for f in items for r in f.requirements})
+    if reqs:
+        return f"Regression on merged PR #{pr_number}: {', '.join(reqs)} violated at HEAD ({first}{more})"
     return f"Regression on merged PR #{pr_number}: probe {first} fails at HEAD{more}"
 
 
@@ -98,8 +103,8 @@ def issue_body(
     session_url: str,
 ) -> str:
     rows = "\n".join(
-        f"| {f.probe} | {f.issue or '-'} | {f.base_exit_code if f.base_exit_code is not None else '-'} "
-        f"| {f.head_exit_code} |"
+        f"| {f.probe} | {', '.join(f.requirements) or '-'} | {f.issue or '-'} "
+        f"| {f.base_exit_code if f.base_exit_code is not None else '-'} | {f.head_exit_code} |"
         for f in items
     )
     evidence = "\n\n".join(
@@ -112,8 +117,8 @@ def issue_body(
 
 The merged commit `{head_sha}` fails a probe that must pass. Verification session: {session_url}
 
-| probe | guards issue | exit at BASE | exit at HEAD |
-|-------|--------------|--------------|--------------|
+| probe | PRD requirement | guards issue | exit at BASE | exit at HEAD |
+|-------|-----------------|--------------|--------------|--------------|
 {rows}
 
 BASE commit: `{base_sha or "unknown"}`

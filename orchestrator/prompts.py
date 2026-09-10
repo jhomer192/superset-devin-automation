@@ -173,9 +173,18 @@ acceptance_met is the probe's exit code being 0, nothing else.
 """
 
 
-def verification_command(target_repo: str, head_sha: str, base_sha: str, issue_numbers: list[int]) -> str:
+def verification_command(
+    target_repo: str,
+    head_sha: str,
+    base_sha: str,
+    issue_numbers: list[int],
+    requirements: list[str] | None = None,
+) -> str:
     issues = ",".join(str(n) for n in issue_numbers)
-    return f'verify/run_all.sh --repo {target_repo} --head {head_sha} --base {base_sha} --issues "{issues}"'
+    cmd = f'verify/run_all.sh --repo {target_repo} --head {head_sha} --base {base_sha} --issues "{issues}"'
+    if requirements:
+        cmd += f' --requirements "{",".join(requirements)}"'
+    return cmd
 
 
 def verification_prompt(
@@ -187,17 +196,20 @@ def verification_prompt(
     issue_numbers: list[int],
     probes: list[Probe],
     playbook_id: str | None = None,
+    requirements: list[str] | None = None,
 ) -> str:
     probe_lines = "\n".join(f"  - {p.id} ({p.kind})" for p in probes) if probes else "  (none)"
     issues = ", ".join(f"#{n}" for n in issue_numbers) or "none referenced"
+    reqs = ", ".join(requirements or []) or "none"
     variables = f"""\
 Regression verification for {pr_url} (merged into {target_repo}).
 
 HEAD (merged commit): {head_sha}
 BASE:                 {base_sha}
 Issues in range: {issues}
+PRD requirements guarded at HEAD (PRD.md in {target_repo}): {reqs}
 Automation repository: https://github.com/{automation_repo}
-Command: {verification_command(target_repo, head_sha, base_sha, issue_numbers)}
+Command: {verification_command(target_repo, head_sha, base_sha, issue_numbers, requirements)}
 Probes to run (from probes/registry.json in the automation repository):
 {probe_lines}
 """
