@@ -4,16 +4,32 @@ An event-driven remediation and regression-verification loop for
 [jhomer192/superset](https://github.com/jhomer192/superset), driven by the
 [Devin v3 API](https://docs.devin.ai/v3-openapi.yaml).
 
-Three Devin Automations exist. All are thin shims: the session they start clones this repo
-and runs `python -m orchestrator ...`. Every decision — which issue gets a session, whether a
+Three Devin Automations form one chain. All are thin shims: the session they start clones this
+repo and runs `python -m orchestrator ...`. Every decision — which issue gets a session, whether a
 merged PR gets verified, whether the fix worked — is made by code in this repository and is
 covered by `tests/`.
 
+```
+PR merges into master ──► TESTING (every 5th merge): verification session, wait for verdict,
+                          verdict comment on every PR of the window
+                             │ acceptance_met == false
+                             ▼
+                          regression issue labelled `sda-regression`
+                             │ github:issues "labeled" event
+                             ▼
+                          AUTOPR: one fix session for that issue ──► fix PR ──► merges ──► TESTING
+```
+
 | Name | Trigger | What the orchestrator does |
 |------|---------|----------------------------|
-| **MAP** — `superset-devin-automation: MAP (Friday ready-issue sweep)` | `schedule:recurring`, condition `{field:"rrule", operator:"recurrence", value:"FREQ=WEEKLY;BYDAY=FR"}` | `python -m orchestrator map`: list open issues labelled `ready`, triage each one, start **at most one** fix session per eligible issue. |
-| **REDUCE** — `superset-devin-automation: REDUCE (verify merged PR)` | `github:pull_request` with `action == "closed"`, `pull_request.merged == true`, `repository.full_name == "jhomer192/superset"` | `python -m orchestrator reduce --event-json <path>`: start **one** verification session for the merged commit that clones Superset, stands up Postgres, builds the frontend, boots the app, and runs the committed probes at HEAD *and* at BASE. |
-| **REPORT** — `superset-devin-automation: REPORT (publish session outcomes)` | `schedule:recurring`, `FREQ=HOURLY` | `python -m orchestrator report`: publish the verdict of every finished fix/verification session onto the issue or PR it belongs to, and append a metrics digest to the tracking issue at most once per `REPORT_DIGEST_EVERY_HOURS`. |
+| **TESTING** — `superset-devin-automation: TESTING (verify every 5th merge, file regressions)` | `github:pull_request` with `action == "closed"`, `pull_request.merged == true`, `repository.full_name == "jhomer192/superset"` | `python -m orchestrator testing --wait --event-json <path>`: count the merge; on every *n*th start **one** verification session that clones Superset, stands up Postgres, builds the frontend, boots the app, runs the committed probes at HEAD *and* at BASE; wait for it; post the verdict on every PR in the window; on failure file **one** `sda-regression` issue. |
+| **AUTOPR** — `superset-devin-automation: AUTOPR (fix session per regression issue + Friday sweep)` | `github:issues` with `action == "labeled"`, `label.name == "sda-regression"`, `repository.full_name == "jhomer192/superset"`; and `schedule:recurring` `FREQ=WEEKLY;BYDAY=FR` | `python -m orchestrator autopr --event-json <path>`: for the issue event, start **one** fix session for that issue if TESTING's `regression_depth` record is on it (an issue a human labelled starts nothing). On the Friday schedule, triage every open `ready` issue and start at most one fix session per eligible issue. |
+| **REPORT** — `superset-devin-automation: REPORT (publish session outcomes)` | `schedule:recurring`, `FREQ=HOURLY` | `python -m orchestrator report`: publish the verdict of every finished fix session onto its issue, sweep verification sessions whose TESTING run did not publish them, and append a metrics digest to the tracking issue at most once per `REPORT_DIGEST_EVERY_HOURS`. |
+
+The issue event is the hand-off between the two stages. There is no polling between them and no
+custom webhook receiver: GitHub delivers `github:issues` to the Devin app, and the trigger's
+`label.name == "sda-regression"` condition is what keeps AUTOPR from firing on any other issue.
+`register` deletes automations still registered under the pre-rename names (MAP, REDUCE).
 
 The automations are created with `run_as: {"type": "organization"}` and a network policy
 allowing `git-manager.devin.ai`. The exact payloads are built in
@@ -25,15 +41,15 @@ prompt that is the same on every run:
 
 | Playbook | Body (`orchestrator/prompts.py`) | Attached schema | Used by |
 |----------|----------------------------------|-----------------|---------|
-| `superset-devin-automation: remediation` | `FIX_PLAYBOOK_BODY`: clone at master, branch, venv from `requirements/development.txt`, run every deciding probe and require non-zero at base, minimal fix following the fork's `AGENTS.md`, re-run probes and require 0, PR body with `Closes #NN`, Conventional Commits title, no AI attribution | `FIX_SCHEMA` | fix sessions started by MAP |
-| `superset-devin-automation: verification` | `VERIFY_PLAYBOOK_BODY`: clone this repo, run `verify/run_all.sh` with the given repo/head/base/issues, copy the resulting verify/out/result.json into the structured output verbatim, never modify `probes/` or `verify/`, no PR | `VERIFICATION_SCHEMA` | verification sessions started by REDUCE |
+| `superset-devin-automation: remediation` | `FIX_PLAYBOOK_BODY`: clone at master, branch, venv from `requirements/development.txt`, run every deciding probe and require non-zero at base, minimal fix following the fork's `AGENTS.md`, re-run probes and require 0, PR body with `Closes #NN`, Conventional Commits title, no AI attribution | `FIX_SCHEMA` | fix sessions started by AUTOPR's Friday sweep |
+| `superset-devin-automation: verification` | `VERIFY_PLAYBOOK_BODY`: clone this repo, run `verify/run_all.sh` with the given repo/head/base/issues, copy the resulting verify/out/result.json into the structured output verbatim, never modify `probes/` or `verify/`, no PR | `VERIFICATION_SCHEMA` | verification sessions started by TESTING |
 
 The per-session prompt is then only the variables: the `@owner/repo` token, the
 `@playbook:{id}` token, and the issue number/title/condition/URL and probe list (fix) or the
 HEAD/BASE SHAs, PR URL, issue numbers and probe list (verification). `playbook_id` on a
 session is read-only; the API derives it from the token, exactly as `repos` is derived from
 `@owner/repo`. If `PLAYBOOK_ID_FIX` or `PLAYBOOK_ID_VERIFY` is unset, the same body is inlined
-into the prompt and a warning is logged; a missing playbook never stops MAP or REDUCE.
+into the prompt and a warning is logged; a missing playbook never stops TESTING or AUTOPR.
 
 The regression fix prompt (`regression_fix_prompt` in `orchestrator/prompts.py`) stays fully
 inline and carries no playbook token: its workflow differs from `FIX_PLAYBOOK_BODY` (reproduce
@@ -53,22 +69,25 @@ pip install -e . && python -m orchestrator simulate
 `simulate` swaps the Devin and GitHub clients for in-memory fakes seeded from `fixtures/`
 (a snapshot of the fork's issues and a merged-PR webhook body) and walks the whole loop:
 
-1. **Friday 1, MAP** — 9 `ready` issues scanned; #12 and #15 (dependency refreshes) are
-   deflected at zero ACU with a logged reason; 7 fix sessions start.
-2. **Friday 1, MAP rerun** — nothing starts: every issue already has a live session.
-3. **A fix session finishes** with structured output and PR #14 merges → **REDUCE** starts one
-   verification session; replaying the same webhook is deduplicated on
-   `(pr_url, merge_commit_sha)`.
-4. **The verification session finishes** with a schema-valid structured output whose
-   `acceptance_met` was decided by probe exit codes; **REPORT** then posts that verdict, the
-   probe exit codes and the ACUs onto PR #14 (and each finished fix session's verdict onto its
-   issue), and a second run posts nothing.
-5. **Friday 2, MAP** — sessions still waiting for a human keep their slot; a dead session's
+1. **Friday 1, AUTOPR sweep** — 9 `ready` issues scanned; #12 and #15 (dependency refreshes)
+   are deflected at zero ACU with a logged reason; 7 fix sessions start.
+2. **Friday 1, sweep rerun** — nothing starts: every issue already has a live session.
+3. **A fix session finishes** with structured output and PR #14 merges as the 5th merge →
+   **TESTING** starts one verification session, waits for it (the fake finishes while TESTING
+   sleeps), and posts the verdict, probe exit codes and ACUs onto all five PRs of the window;
+   replaying the same webhook is deduplicated on `(pr_url, merge_commit_sha)`.
+4. **REPORT** posts each finished fix session's verdict onto its issue and the digest; a second
+   run posts nothing.
+5. **A later 5th merge fails verification** → TESTING files one issue labelled `sda-regression`
+   with the window, SHAs and failing probes. The fake `github:issues` event for that issue runs
+   **AUTOPR**, which starts exactly one fix session; replaying the event starts nothing, and an
+   issue a human created with the same label starts nothing (no `regression_depth` record).
+6. **Friday 2, sweep** — sessions still waiting for a human keep their slot; a dead session's
    issue is retried; the merged issue is gone from the `ready` list.
-6. **Metrics** are computed over the fake sessions, and the automation payloads are
+7. **Metrics** are computed over the fake sessions, and the automation payloads are
    dry-run validated.
-7. **Playbooks** are registered into the fake org twice (same two ids both times), and one more
-   MAP with those ids shows every fix prompt carrying the `@playbook:` token; the earlier steps
+8. **Playbooks** are registered into the fake org twice (same two ids both times), and one more
+   sweep with those ids shows every fix prompt carrying the `@playbook:` token; the earlier steps
    ran with the ids unset, exercising the inline fallback.
 
 Every structured output the fakes emit is validated against the same schemas live sessions
@@ -83,9 +102,10 @@ docker compose run --rm orchestrator register-playbooks --dry-run   # print vali
 docker compose run --rm orchestrator register-playbooks   # create/update both playbooks; prints PLAYBOOK_ID_*
 # put the printed PLAYBOOK_ID_FIX / PLAYBOOK_ID_VERIFY in .env, then:
 docker compose run --rm orchestrator register --dry-run   # print validated automation payloads
-docker compose run --rm orchestrator register             # create/update both automations (shims carry the ids)
-docker compose run --rm orchestrator map                  # what Friday would do, right now
-docker compose run --rm orchestrator reduce --event-json /events/pr.json
+docker compose run --rm orchestrator register             # create/update the three automations (shims carry the ids)
+docker compose run --rm orchestrator autopr               # what Friday would do, right now
+docker compose run --rm orchestrator autopr --event-json /events/issue.json   # one github:issues event
+docker compose run --rm orchestrator testing --wait --event-json /events/pr.json
 docker compose run --rm orchestrator report --days 30
 docker compose run --rm orchestrator metrics --days 30
 ```
@@ -102,9 +122,16 @@ refused). `register` and
 Secrets come from environment variables only; `.env.example` ships with empty values and
 `.env` is git-ignored. `orchestrator/config.py` is the complete list of settings.
 
-## How a fix session is decided (MAP)
+## How a fix session is decided (AUTOPR)
 
-For every open issue labelled `ready`, in order (`orchestrator/map_job.py`):
+On a `github:issues` event (`run_autopr_for_issue` in `orchestrator/autopr_job.py`): the event
+must be `labeled`/`opened` with the `sda-regression` label for the target repo; the issue's
+ledger must carry the `regression_depth` entry TESTING wrote when it filed it (otherwise the
+issue was labelled by hand and nothing starts); an open PR closing it or a live `issue-<n>`
+session means skip; else one fix session starts from the recorded PR, HEAD and probes
+(`start_regression_fix` in `orchestrator/regression.py`).
+
+On the Friday sweep, for every open issue labelled `ready`, in order:
 
 1. **Already in flight?** An open PR whose body closes the issue, or a Devin session tagged
    `issue-<n>` that still holds its slot, means skip. Liveness follows the v3 status enum
@@ -127,9 +154,9 @@ For every open issue labelled `ready`, in order (`orchestrator/map_job.py`):
 Progress is an append-only comment log on the issue (`orchestrator/ledger.py`,
 `<!-- sda:{json} -->` markers) because GitHub has no conditional write for issue bodies.
 
-## How a merged PR is verified (REDUCE)
+## How a merged PR is verified (TESTING)
 
-`orchestrator/reduce_job.py` accepts only `closed` + `merged` events for the target repo
+`orchestrator/testing_job.py` accepts only `closed` + `merged` events for the target repo
 whose `pull_request.base.ref` is `VERIFY_BRANCH`, resolves the issues the merged PRs close
 (`Closes #n` keywords) plus every issue whose fix already landed (regression guards), and starts
 one session keyed `(pr_url, merge_commit_sha)`. The ledger comment on the PR makes a replayed
@@ -146,14 +173,14 @@ VERIFY_BRANCH=main            # only PRs merged into this branch count (default:
 VERIFY_EVERY_N_MERGES=5       # verify when count % n == 0 (default: 5)
 ```
 
-On each event, `run_reduce` lists the PRs merged into `VERIFY_BRANCH` (`GET /pulls?state=closed&base=…`,
+On each event, `run_testing` lists the PRs merged into `VERIFY_BRANCH` (`GET /pulls?state=closed&base=…`,
 ordered by `merged_at`) and takes this PR's 1-based position *k*. If `k % n != 0` it appends a
 `merge_counted` ledger comment ("merge k, verification deferred") to the PR and exits without a
 session. If `k % n == 0` it verifies the window of the last *n* merges: HEAD is this PR's
 `merge_commit_sha`, BASE is the first parent of the oldest merge in the window, and the probes
 cover every issue closed anywhere in the window. A replayed webhook finds the `merge_counted` or
 `verification_started` record and does nothing; PRs merged into other branches are skipped
-before counting. `register` bakes both values into the REDUCE prompt and metadata, so changing
+before counting. `register` bakes both values into the TESTING prompt and metadata, so changing
 them is `VERIFY_BRANCH=… VERIFY_EVERY_N_MERGES=… orchestrator register`.
 
 The session runs `verify/run_all.sh`, which on the Devin VM:
@@ -170,6 +197,14 @@ The session runs `verify/run_all.sh`, which on the Devin VM:
 Acceptance is mechanical: a probe for an issue the PR closes must **pass at HEAD and fail at
 BASE**; one that already passes at BASE fails the run (`verification_prompt` states why). A
 probe for an already-landed fix (regression guard) must pass at HEAD.
+
+With `--wait` (the registered shim always passes it) the command then polls
+`GET /sessions/{id}` every 60 s until the verification reaches a terminal state, with no
+deadline, and publishes through `orchestrator/publish.py`: a `session_reported` comment with the
+verdict, per-probe BASE/HEAD exit codes, ACUs and session URL on every PR of the window, and on
+`acceptance_met == false` the regression issue (see Self-healing). The same code runs from
+REPORT for a verification whose TESTING session did not live to publish it, keyed on the same
+markers, so nothing is posted twice.
 
 ## Probes
 
@@ -204,7 +239,7 @@ Every v3 endpoint this loop calls, all under `/v3/organizations/{org_id}` (`orch
 | Endpoint | Used for |
 |----------|----------|
 | `POST /sessions`, `GET /sessions/{id}`, `GET /sessions` | start fix/verification sessions, dedup on live sessions |
-| `GET /automations`, `POST /automations`, `PUT /automations/{id}` | `register` (idempotent by name) |
+| `GET /automations`, `POST /automations`, `PATCH /automations/{id}`, `DELETE /automations/{id}` | `register` (idempotent by name; deletes the retired MAP/REDUCE registrations) |
 | `GET /playbooks`, `POST /playbooks`, `PUT /playbooks/{id}` | `register-playbooks` (idempotent by title); payload is `PlaybookCreateRequest` |
 | `GET /metrics/sessions`, `GET /metrics/prs`, `GET /consumption/daily/sessions/{id}` | `metrics` |
 
@@ -230,17 +265,29 @@ Every v3 endpoint this loop calls, all under `/v3/organizations/{org_id}` (`orch
 
 The report also carries a `limitations` list so a reader never has to infer them.
 
-Nobody has to run that command, though: the **REPORT** automation (`orchestrator/report_job.py`)
-runs hourly and writes the same information to GitHub. For each `sda-fix` / `sda-verify` session
-that has reached a terminal state it appends one ledger comment to the issue or PR the session
-belongs to — verdict (`acceptance_met`, or the `error_message`), per-probe BASE/HEAD exit codes,
-ACUs from `GET /consumption/daily/sessions/{id}`, and the session URL — and every
-`REPORT_DIGEST_EVERY_HOURS` it appends the metrics table above to `REPORT_DIGEST_ISSUE`
-(live: https://github.com/jhomer192/superset/issues/22). Sessions
-still running or waiting for a human are left alone until they finish, and a `session_reported`
-marker already on the thread means the run skips that session, so the automation is safe to run as
-often as you like. Polling is the mechanism because automations have no completion callback — the
-same constraint that makes the REDUCE cadence counter derived rather than stored.
+Each stage also writes its own record where the work is:
+
+| stage | where | ledger entries (`<!-- sda:{json} -->`) and what they answer |
+|-------|-------|-------------------------------------------------------------|
+| TESTING | every PR merged into `VERIFY_BRANCH` | `merge_counted` (position k of n: did the merge count?); `verification_started` (session id, HEAD, BASE, window: what is being verified?); `session_reported` (verdict, probe exit codes, ACUs: did it pass?); `regression_filed` / `regression_escalated` (issue number, depth: what happened to a failure?) |
+| AUTOPR | the regression issue / each `ready` issue | `regression_depth` (chain depth, PR, window, probes: why does this issue exist?); `session_started` with `trigger: github:issues` or `sweep` (which session, started by what?); `triage_deflected` (why nothing started) |
+| REPORT | the issue | `session_reported` for fix sessions (verdict, PR URL, ACUs) |
+
+The command's own JSON output (`TestingReport`, `AutoprReport`, `ReportReport`) is what the
+automation session prints, so the invocation list on the automation page shows the same
+decisions: `merge_index`, `skipped_reason`, `verdict`, `posted_to`, `regression_filed`,
+`started`, `skipped_in_flight`.
+
+The **REPORT** automation (`orchestrator/report_job.py`) runs hourly for the sessions nobody is
+waiting on. For each `sda-fix` session that has reached a terminal state it appends one ledger
+comment to its issue — verdict (`acceptance_met`, or the `error_message`), the PR, ACUs from
+`GET /consumption/daily/sessions/{id}`, and the session URL — sweeps `sda-verify` sessions that
+TESTING did not publish, and every `REPORT_DIGEST_EVERY_HOURS` appends the metrics table above to
+`REPORT_DIGEST_ISSUE` (live: https://github.com/jhomer192/superset/issues/22). Sessions still
+running or waiting for a human are left alone until they finish, and a `session_reported` marker
+already on the thread means the run skips that session, so the automation is safe to run as often
+as you like. Polling is the mechanism because automations have no completion callback — the same
+constraint that makes the TESTING cadence counter derived rather than stored.
 
 ### What polling costs
 
@@ -255,20 +302,23 @@ next run.
 ## Self-healing
 
 A verification whose structured output says `acceptance_met == false` has found a probe that
-fails on a commit already on `master`. REPORT files that verdict as work
-(`orchestrator/regression.py`): it opens one issue on the target repo labelled
-`regression`/`automation` naming the PR whose merge triggered the verification, listing every PR
-in the verified window (any of them could be the cause), the HEAD and BASE SHAs, the probe table
-with both exit codes and the captured evidence, then starts one fix session tagged
-`sda-fix`/`sda-regression` for it. The verdict comment still lands on every PR thread in the
-window; only the remediation is once per failed verification, whatever the cadence. That session must reproduce the failure before touching anything, make the smallest fix, add
-a test, and run the probes and the surrounding unit tests before opening its PR — and when that
-PR merges, REDUCE verifies it like any other. The probes are the contract in both directions:
-the issue states they must not be edited or relaxed.
+fails on a commit already on `master`. TESTING files that verdict as work
+(`file_regression_issue` in `orchestrator/regression.py`): one issue on the target repo labelled
+`sda-regression`/`regression` naming the PR whose merge triggered the verification, listing every
+PR in the verified window (any of them could be the cause), the HEAD and BASE SHAs, the probe
+table with both exit codes and the captured evidence, plus a `regression_depth` ledger entry with
+the PR, window and probes. The `labeled` event for `sda-regression` runs AUTOPR, which reads that
+entry and starts one fix session tagged `sda-fix`/`sda-regression`. The verdict comment still
+lands on every PR thread in the window; only the remediation is once per failed verification,
+whatever the cadence. That session must reproduce the failure before touching anything, make the
+smallest fix, add a test, and run the probes and the surrounding unit tests before opening its PR
+— and when that PR merges, TESTING verifies it like any other. The probes are the contract in
+both directions: the issue states they must not be edited or relaxed.
 
 Two things keep the loop finite. A `regression_filed` marker keyed by the verification session,
-found on any PR thread in the window, means the failure already has an issue, so re-running
-REPORT files nothing. And each filed issue records its
+found on any PR thread in the window, means the failure already has an issue, so neither TESTING
+nor REPORT files it twice, and a replayed issue event finds the live `issue-<n>` session and
+starts nothing. And each filed issue records its
 `regression_depth`; a PR that closes a regression issue inherits it, so after `MAX_CHAIN_DEPTH`
 failed automated attempts on the same chain the run writes `regression_escalated` on the PR and
 stops instead of spending ACUs in a cycle.
@@ -290,7 +340,7 @@ CI (`.github/workflows/ci.yml`) runs the same plus `docker compose build` and a 
 * **Cadence.** Fix sessions start on Fridays; verification runs on every *n*th merge into
   `VERIFY_BRANCH` (see above). The counter is not held by the automation — it cannot be, there is
   no callback action — but computed from the branch's merged-PR history on each event.
-* **Regression guards.** REDUCE runs the probes for already-landed fixes too, not only the PR's
+* **Regression guards.** TESTING runs the probes for already-landed fixes too, not only the PR's
   own issue — that is what "no regressions since last time" actually requires.
 * **Issue #15** duplicates #12 (same lockfile defect, closed by PR 17). Both are deflected by
-  MAP; the registry maps #15 to the same probe so the merge of PR 17 is verified.
+  the AUTOPR sweep; the registry maps #15 to the same probe so the merge of PR 17 is verified.

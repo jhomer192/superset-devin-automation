@@ -32,6 +32,8 @@ class DevinClient(Protocol):
 
     def update_automation(self, automation_id: str, body: JSON) -> JSON: ...
 
+    def delete_automation(self, automation_id: str) -> None: ...
+
     def list_playbooks(self) -> list[JSON]: ...
 
     def create_playbook(self, body: JSON) -> JSON: ...
@@ -60,6 +62,9 @@ class LiveDevinClient:
 
     def _patch(self, path: str, body: JSON) -> Any:
         return request_json("PATCH", f"{self._org}{path}", headers=self._headers, body=body)
+
+    def _delete(self, path: str) -> Any:
+        return request_json("DELETE", f"{self._org}{path}", headers=self._headers)
 
     def _put(self, path: str, body: JSON) -> Any:
         return request_json("PUT", f"{self._org}{path}", headers=self._headers, body=body)
@@ -122,6 +127,10 @@ class LiveDevinClient:
     def update_automation(self, automation_id: str, body: JSON) -> JSON:
         result: JSON = self._patch(f"/automations/{automation_id}", body)
         return result
+
+    # DELETE /v3/organizations/{org_id}/automations/{automation_id}
+    def delete_automation(self, automation_id: str) -> None:
+        self._delete(f"/automations/{automation_id}")
 
     # GET /v3/organizations/{org_id}/playbooks
     def list_playbooks(self) -> list[JSON]:

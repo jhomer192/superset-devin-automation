@@ -1,19 +1,19 @@
-"""Close the loop on a failed verification: file an issue, then start a session to fix it.
+"""Close the loop on a failed verification: file an issue, then fix it from the issue event.
 
 A verification session that reports `acceptance_met == false` has found a probe that fails on
 the merged commit. That is a regression in the target repo, and the loop treats it exactly like
 any other piece of work it owns: an issue with binding acceptance criteria, then a fix session
-whose verdict is a probe exit code. The filed issue is tagged into the fix session so REPORT
-publishes its outcome and the metrics count it with every other fix.
+whose verdict is a probe exit code.
 
-A verification covers a window of merges and is tagged onto every PR in it, but one failure is
-one piece of work: exactly one issue and one fix session per failed verification, whatever the
-cadence. The issue names the PR whose merge triggered the verification and lists the whole window,
-since any merge in it may be the cause.
+The two halves run in different automations. TESTING files the issue with the `sda-regression`
+label and records what failed in a `regression_depth` ledger entry on the issue. GitHub's
+`github:issues` event for that label triggers AUTOPR, which reads the entry back and starts the
+one fix session. The filed issue is tagged into the fix session so REPORT publishes its outcome
+and the metrics count it with every other fix.
 
-The issue number is not known until GitHub assigns it, so idempotency is anchored on the PR
-threads instead: a `regression_filed` marker carrying the verification session id on any PR of
-the window means this failure has already been turned into an issue.
+A verification covers a window of merges but one failure is one piece of work: exactly one issue
+per failed verification, whatever the cadence. The issue names the PR whose merge triggered the
+verification and lists the whole window, since any merge in it may be the cause.
 """
 
 from __future__ import annotations
@@ -32,9 +32,10 @@ log = logging.getLogger(__name__)
 
 FIX_TAG = "sda-fix"
 REGRESSION_TAG = "sda-regression"
-# Deliberately not MAP's `ready` label: the issue is filed together with the session that fixes
-# it, and MAP triages against the static probe registry, which a new regression is not in.
-REGRESSION_LABELS = ["regression", "automation"]
+# The label is the trigger: AUTOPR's `github:issues` condition matches it and nothing else, so
+# issues humans file never start a session by themselves.
+REGRESSION_LABEL = "sda-regression"
+REGRESSION_LABELS = [REGRESSION_LABEL, "regression"]
 # A fix that regresses again is filed once more; beyond that the chain stops and waits for a human,
 # so a Devin that cannot solve the problem cannot spend the organization's ACUs in a cycle.
 MAX_CHAIN_DEPTH = 2
@@ -156,9 +157,8 @@ def chain_depth(gh: GitHubClient, ledger: IssueLedger, target_repo: str, pr_numb
     return max(depths, default=0)
 
 
-def file_regression(
+def file_regression_issue(
     *,
-    devin: DevinClient,
     gh: GitHubClient,
     ledger: IssueLedger,
     target_repo: str,
@@ -171,7 +171,7 @@ def file_regression(
     base_sha: str | None,
     depth: int = 0,
 ) -> dict[str, Any]:
-    """Open one regression issue for a failed verification and start the session that fixes it.
+    """Open one regression issue for a failed verification and record what the fix must satisfy.
 
     `pr_number` is the merge that triggered the verification; `window_prs` is every merge it
     covered, `head_sha`/`base_sha` the range it ran against.
@@ -196,7 +196,54 @@ def file_regression(
     )
     number = int(issue["number"])
     issue_url = str(issue.get("html_url") or f"https://github.com/{target_repo}/issues/{number}")
+    probes = [f.probe for f in items]
+    ledger.append(
+        number,
+        "Regression lineage",
+        LedgerEntry(
+            "regression_depth",
+            data={
+                "depth": depth,
+                "regression_of": pr_url,
+                "head": head_sha,
+                "window": list(window_prs),
+                "probes": probes,
+                "verification_session_id": session.get("session_id"),
+            },
+        ),
+        [f"chain depth {depth} of {MAX_CHAIN_DEPTH}", f"deciding probes: {', '.join(probes)}"],
+    )
+    log.info("regression #%d filed for %s", number, pr_url)
+    return {
+        "issue": number,
+        "issue_url": issue_url,
+        "probes": probes,
+        "depth": depth,
+        "window": list(window_prs),
+    }
 
+
+def regression_record(entries: list[LedgerEntry]) -> LedgerEntry | None:
+    """The `regression_depth` entry TESTING wrote when it filed the issue, if this is one."""
+    found = find(entries, "regression_depth")
+    return found[-1] if found else None
+
+
+def start_regression_fix(
+    *,
+    devin: DevinClient,
+    ledger: IssueLedger,
+    target_repo: str,
+    automation_repo: str,
+    issue: dict[str, Any],
+    record: LedgerEntry,
+) -> dict[str, Any]:
+    """Start the one fix session for a regression issue, from what TESTING recorded on it."""
+    number = int(issue["number"])
+    issue_url = str(issue.get("html_url") or f"https://github.com/{target_repo}/issues/{number}")
+    pr_url = str(record.data.get("regression_of") or "")
+    head_sha = str(record.data.get("head") or "")
+    probes = [str(p) for p in record.data.get("probes") or []]
     fix = devin.create_session(
         {
             "prompt": regression_fix_prompt(
@@ -206,7 +253,7 @@ def file_regression(
                 issue_url=issue_url,
                 pr_url=pr_url,
                 head_sha=head_sha,
-                probes=[f.probe for f in items],
+                probes=probes,
             ),
             "title": f"Fix regression {target_repo}#{number} from {pr_url}",
             "tags": [FIX_TAG, REGRESSION_TAG, f"issue-{number}"],
@@ -216,7 +263,6 @@ def file_regression(
         }
     )
     fix_id = str(fix["session_id"])
-
     ledger.append(
         number,
         "Remediation session started",
@@ -226,27 +272,15 @@ def file_regression(
                 "session_id": fix_id,
                 "kind": "fix",
                 "regression_of": pr_url,
-                "window": list(window_prs),
-                "depth": depth,
+                "window": list(record.data.get("window") or []),
+                "depth": record.data.get("depth", 0),
+                "trigger": "github:issues",
             },
         ),
         [
             f"session: `{fix_id}`" + (f" ({fix['url']})" if fix.get("url") else ""),
-            f"deciding probes: {', '.join(f.probe for f in items)}",
+            f"deciding probes: {', '.join(probes)}",
         ],
     )
-    ledger.append(
-        number,
-        "Regression lineage",
-        LedgerEntry("regression_depth", data={"depth": depth, "regression_of": pr_url}),
-        [f"chain depth {depth} of {MAX_CHAIN_DEPTH}"],
-    )
-    log.info("REPORT: regression #%d filed for %s -> session %s", number, pr_url, fix_id)
-    return {
-        "issue": number,
-        "issue_url": issue_url,
-        "session_id": fix_id,
-        "probes": [f.probe for f in items],
-        "depth": depth,
-        "window": list(window_prs),
-    }
+    log.info("AUTOPR: regression #%d -> session %s", number, fix_id)
+    return {"issue": number, "session_id": fix_id, "probes": probes}

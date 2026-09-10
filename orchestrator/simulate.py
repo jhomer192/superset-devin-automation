@@ -77,6 +77,9 @@ class FakeDevin:
         self.automations[automation_id].update(body)
         return dict(self.automations[automation_id])
 
+    def delete_automation(self, automation_id: str) -> None:
+        del self.automations[automation_id]
+
     def list_playbooks(self) -> list[JSON]:
         return [dict(p) for p in self.playbooks.values()]
 
@@ -302,3 +305,13 @@ def pr_number(url: str) -> int:
     if not m:
         raise ValueError(f"not a PR url: {url}")
     return int(m.group(1))
+
+
+def issue_event(issue: JSON, repo: str, action: str = "labeled", label: str = "sda-regression") -> JSON:
+    """The github:issues payload GitHub sends when `label` is put on `issue`."""
+    return {
+        "action": action,
+        "issue": dict(issue),
+        "label": {"name": label},
+        "repository": {"full_name": repo},
+    }

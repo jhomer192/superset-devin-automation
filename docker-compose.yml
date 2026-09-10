@@ -1,5 +1,5 @@
 # `docker compose up` runs the whole loop offline against fixtures (no API keys needed).
-# `docker compose run --rm orchestrator map` / `reduce --event-json /events/pr.json` /
+# `docker compose run --rm orchestrator autopr` / `testing --wait --event-json /events/pr.json` /
 # `report` / `metrics` / `register` / `register-playbooks` use the credentials from .env
 # (copy .env.example).
 services:

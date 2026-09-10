@@ -8,16 +8,16 @@ import pytest
 
 from orchestrator import automations, devin_api, metrics, playbooks, prompts
 from orchestrator.__main__ import cmd_simulate, count_deflections
+from orchestrator.autopr_job import NotARegressionIssue, extract_regression_issue, run_autopr
 from orchestrator.config import load_settings
 from orchestrator.github_api import closing_issue_numbers
 from orchestrator.ledger import IssueLedger, LedgerEntry, find, parse_entries
-from orchestrator.map_job import run_map
-from orchestrator.reduce_job import NotAMergedPR, extract_merged_pr, run_reduce
 from orchestrator.registry import load_registry
 from orchestrator.report_job import digest_lines, run_report
 from orchestrator.schema import FIX_SCHEMA
 from orchestrator.sessions import Liveness, classify, holds_slot, is_finished
-from orchestrator.simulate import FakeDevin, FakeGitHub, load_event
+from orchestrator.simulate import FakeDevin, FakeGitHub, issue_event, load_event
+from orchestrator.testing_job import NotAMergedPR, extract_merged_pr, run_testing
 from orchestrator.triage import Decision, Reason
 from orchestrator.triage import classify as triage
 
@@ -36,14 +36,14 @@ def world():
 
 
 def do_map(devin, gh, registry):
-    return run_map(
+    return run_autopr(
         devin=devin, gh=gh, registry=registry, target_repo=REPO, automation_repo=AUTO, ready_label="ready"
     )
 
 
 def do_reduce(devin, gh, registry, event=None):
     """REDUCE at every_n=1 against the single-merge fixture, so one event is one verification."""
-    return run_reduce(
+    return run_testing(
         devin=devin,
         gh=gh,
         registry=registry,
@@ -54,8 +54,8 @@ def do_reduce(devin, gh, registry, event=None):
     )
 
 
-def run_reduce_n(devin, gh, registry, event, *, branch, n):
-    return run_reduce(
+def run_testing_n(devin, gh, registry, event, *, branch, n):
+    return run_testing(
         devin=devin,
         gh=gh,
         registry=registry,
@@ -248,7 +248,7 @@ def test_reduce_verifies_every_nth_merge_into_selected_branch(registry, world):
     reports = []
     for i in range(1, 6):
         ev = merge_event(gh, 100 + i, branch="main", sha=str(i) * 40, body=bodies.get(i, ""))
-        reports.append(run_reduce_n(devin, gh, registry, ev, branch="main", n=5))
+        reports.append(run_testing_n(devin, gh, registry, ev, branch="main", n=5))
     assert [r.merge_index for r in reports] == [1, 2, 3, 4, 5]
     assert all(r.session_id is None and "of 5" in r.skipped_reason for r in reports[:4])
     fifth = reports[4]
@@ -262,7 +262,7 @@ def test_reduce_verifies_every_nth_merge_into_selected_branch(registry, world):
     # the 10th merge is the next trigger and its window starts after the 5th
     for i in range(6, 11):
         ev = merge_event(gh, 100 + i, branch="main", sha=chr(ord("a") + i) * 40)
-        r = run_reduce_n(devin, gh, registry, ev, branch="main", n=5)
+        r = run_testing_n(devin, gh, registry, ev, branch="main", n=5)
     assert r.merge_index == 10 and r.session_id and r.base_sha == "5" * 40
     assert r.window_prs == [106, 107, 108, 109, 110]
 
@@ -278,7 +278,7 @@ def test_cadence_holds_across_windows_at_every_n_5(registry, world):
     reports = {}
     for i in range(1, 16):
         ev = merge_event(gh, 300 + i, branch="main", sha=shas[i])
-        reports[i] = run_reduce_n(devin, gh, registry, ev, branch="main", n=5)
+        reports[i] = run_testing_n(devin, gh, registry, ev, branch="main", n=5)
     assert [reports[i].merge_index for i in range(1, 16)] == list(range(1, 16))
     verified = sorted(i for i, r in reports.items() if r.session_id)
     assert verified == [5, 10, 15]
@@ -300,7 +300,7 @@ def test_cadence_verification_runs_when_the_window_closes_no_issue(registry, wor
     gh.close_completed(7)  # a fix already landed; its probes are the regression suite
     for i in range(1, 6):
         ev = merge_event(gh, 400 + i, branch="main", sha=f"{i:040x}", body="chore: nothing closed")
-        r = run_reduce_n(devin, gh, registry, ev, branch="main", n=5)
+        r = run_testing_n(devin, gh, registry, ev, branch="main", n=5)
     assert r.merge_index == 5 and r.closes == [] and r.session_id
     assert r.regression_issues == [7]
     prompt = devin.sessions[r.session_id]["prompt"]
@@ -315,7 +315,7 @@ def test_cadence_window_covers_every_merge_between_base_and_head(registry, world
     shas = {i: f"{i:040x}" for i in range(1, 11)}
     for i in range(1, 11):
         ev = merge_event(gh, 500 + i, branch="main", sha=shas[i])
-        r = run_reduce_n(devin, gh, registry, ev, branch="main", n=5)
+        r = run_testing_n(devin, gh, registry, ev, branch="main", n=5)
         if i == 5:
             first = r
     second = r
@@ -334,21 +334,21 @@ def test_reduce_replay_does_not_recount_and_other_branches_do_not_count(registry
     devin, gh = world
     gh.branch_heads["main"] = "a" * 40
     ev = merge_event(gh, 201, branch="main", sha="1" * 40)
-    first = run_reduce_n(devin, gh, registry, ev, branch="main", n=5)
+    first = run_testing_n(devin, gh, registry, ev, branch="main", n=5)
     assert first.merge_index == 1 and first.session_id is None
-    replay = run_reduce_n(devin, gh, registry, ev, branch="main", n=5)
+    replay = run_testing_n(devin, gh, registry, ev, branch="main", n=5)
     assert "already counted" in replay.skipped_reason and replay.merge_index is None
     assert len(find(IssueLedger(gh, REPO).read(201), "merge_counted")) == 1
 
     for i in range(2, 6):
         side = merge_event(gh, 200 + i, branch="release-4.0", sha=str(i) * 40)
-        r = run_reduce_n(devin, gh, registry, side, branch="main", n=5)
+        r = run_testing_n(devin, gh, registry, side, branch="main", n=5)
         assert "only 'main'" in r.skipped_reason and r.merge_index is None
     assert gh.list_merged_pulls(REPO, "main") and len(gh.list_merged_pulls(REPO, "main")) == 1
     assert devin.sessions == {}
 
     # the fixture PR is merged into master; with VERIFY_BRANCH=main it is ignored entirely
-    r = run_reduce_n(devin, gh, registry, load_event(), branch="main", n=1)
+    r = run_testing_n(devin, gh, registry, load_event(), branch="main", n=1)
     assert r.skipped_reason and r.session_id is None
 
 
@@ -380,13 +380,13 @@ def test_report_settings_from_environment(monkeypatch):
 
 
 def test_reduce_automation_prompt_carries_cadence():
-    payload = automations.reduce_payload(REPO, AUTO, "main", 5)
+    payload = automations.testing_payload(REPO, AUTO, "main", 5)
     prompt = payload["actions"][0]["prompt"]
     assert "VERIFY_BRANCH=main VERIFY_EVERY_N_MERGES=5" in prompt
     assert payload["metadata"]["verify_branch"] == "main"
     assert automations.validate_payload(payload) == []
     # the trigger itself is unchanged: it still fires on every merged PR, the counter is in code
-    assert payload["triggers"] == automations.reduce_payload(REPO, AUTO)["triggers"]
+    assert payload["triggers"] == automations.testing_payload(REPO, AUTO)["triggers"]
 
 
 # --- playbooks --------------------------------------------------------------------------------
@@ -464,7 +464,7 @@ def test_map_and_reduce_run_with_and_without_playbook_ids(registry, world, caplo
     assert all("@playbook:" not in s["prompt"] for s in devin.sessions.values())
 
     devin2, gh2 = FakeDevin(), FakeGitHub.from_fixtures()
-    run_map(
+    run_autopr(
         devin=devin2,
         gh=gh2,
         registry=registry,
@@ -480,7 +480,7 @@ def test_map_and_reduce_run_with_and_without_playbook_ids(registry, world, caplo
     with caplog.at_level("WARNING"):
         r = do_reduce(devin2, gh2, registry)
     assert r.session_id and "PLAYBOOK_ID_VERIFY unset" in caplog.text
-    r2 = run_reduce(
+    r2 = run_testing(
         devin=FakeDevin(),
         gh=FakeGitHub.from_fixtures(),
         registry=registry,
@@ -505,12 +505,12 @@ def test_playbook_settings_from_environment(monkeypatch):
 
 
 def test_automation_shims_pass_playbook_ids_through():
-    m = automations.map_payload(REPO, AUTO, "pb-1")
-    r = automations.reduce_payload(REPO, AUTO, "main", 5, "pb-2")
-    assert "PLAYBOOK_ID_FIX=pb-1 python -m orchestrator map" in m["actions"][0]["prompt"]
-    assert "PLAYBOOK_ID_VERIFY=pb-2 python -m orchestrator reduce" in r["actions"][0]["prompt"]
+    m = automations.autopr_payload(REPO, AUTO, "pb-1")
+    r = automations.testing_payload(REPO, AUTO, "main", 5, "pb-2")
+    assert "PLAYBOOK_ID_FIX=pb-1 python -m orchestrator autopr" in m["actions"][0]["prompt"]
+    assert "PLAYBOOK_ID_VERIFY=pb-2 python -m orchestrator testing --wait" in r["actions"][0]["prompt"]
     assert automations.validate_payload(m) == [] and automations.validate_payload(r) == []
-    assert "PLAYBOOK_ID" not in automations.map_payload(REPO, AUTO)["actions"][0]["prompt"]
+    assert "PLAYBOOK_ID" not in automations.autopr_payload(REPO, AUTO)["actions"][0]["prompt"]
 
 
 def test_reduce_adds_regression_guards_for_landed_fixes(registry, world):
@@ -627,8 +627,8 @@ def test_metrics_with_no_sessions_has_no_division_by_zero():
 
 def test_automation_payloads_validate_against_openapi_and_carry_no_ceilings():
     for payload in (
-        automations.map_payload(REPO, AUTO),
-        automations.reduce_payload(REPO, AUTO),
+        automations.autopr_payload(REPO, AUTO),
+        automations.testing_payload(REPO, AUTO),
         automations.report_payload(REPO, AUTO, 42),
     ):
         assert automations.validate_payload(payload) == []
@@ -641,28 +641,31 @@ def test_automation_payloads_validate_against_openapi_and_carry_no_ceilings():
         assert "python -m orchestrator" in payload["actions"][0]["prompt"]
 
 
-def test_map_trigger_is_friday_rrule_and_reduce_filters_merged_prs():
-    m = automations.map_payload(REPO, AUTO)["triggers"][0]
-    assert m["event_type"] == "schedule:recurring"
-    assert m["conditions"]["any"][0]["all"] == [
+def test_autopr_triggers_on_the_regression_label_and_friday_and_testing_on_merged_prs():
+    issue_trigger, friday = automations.autopr_payload(REPO, AUTO)["triggers"]
+    assert issue_trigger["event_type"] == "github:issues"
+    conds = {c["field"]: c["value"] for c in issue_trigger["conditions"]["any"][0]["all"]}
+    assert conds == {"action": "labeled", "label.name": "sda-regression", "repository.full_name": REPO}
+    assert friday["event_type"] == "schedule:recurring"
+    assert friday["conditions"]["any"][0]["all"] == [
         {"field": "rrule", "operator": "recurrence", "value": "FREQ=WEEKLY;BYDAY=FR"}
     ]
-    r = automations.reduce_payload(REPO, AUTO)["triggers"][0]
+    r = automations.testing_payload(REPO, AUTO)["triggers"][0]
     assert r["event_type"] == "github:pull_request"
     conds = {c["field"]: c["value"] for c in r["conditions"]["any"][0]["all"]}
     assert conds == {"action": "closed", "pull_request.merged": True, "repository.full_name": REPO}
 
 
 def test_invalid_payloads_are_rejected():
-    bad = automations.map_payload(REPO, AUTO)
+    bad = automations.autopr_payload(REPO, AUTO)
     bad["limits"] = {"max_acu_limit": 10}
     with pytest.raises(ValueError, match="max_acu_limit"):
         automations.assert_no_ceilings(bad)
-    bad = automations.map_payload(REPO, AUTO)
+    bad = automations.autopr_payload(REPO, AUTO)
     bad["actions"].append({"type": "start_session", "prompt": "second"})
     with pytest.raises(ValueError, match="at most one"):
         automations.assert_no_ceilings(bad)
-    bad = automations.map_payload(REPO, AUTO)
+    bad = automations.autopr_payload(REPO, AUTO)
     bad["triggers"][0]["event_type"] = "cron"
     assert automations.validate_payload(bad)
 
@@ -691,11 +694,33 @@ def test_report_automation_is_hourly_and_carries_the_digest_issue():
 
 def test_simulate_runs_end_to_end(registry):
     out = cmd_simulate(load_settings(simulate=True), registry)
-    assert out["friday_1_map_rerun_is_idempotent"]["started"] == []
-    assert out["merge_reduce_replay_is_deduplicated"]["skipped_reason"]
+    assert out["friday_1_autopr_rerun_is_idempotent"]["started"] == []
+    assert out["merge_testing_replay_is_deduplicated"]["skipped_reason"]
     assert out["verification_structured_output"]["acceptance_met"] is True
+    assert out["merge_testing"]["verdict"] == "acceptance met"
+    assert out["merge_testing"]["posted_to"] == out["merge_testing"]["window_prs"]
     assert out["metrics"]["triage_deflections"] == 2
     assert out["metrics"]["sessions_with_merged_pr"] == 1
+
+
+def test_simulate_chains_testing_to_autopr_through_the_issue_event(registry):
+    out = cmd_simulate(load_settings(simulate=True), registry)
+    failed = out["regressing_merge_testing"]
+    assert failed["verdict"] == "acceptance NOT met"
+    issue = failed["regression_filed"]["issue"]
+    started = out["regression_issue_event_autopr"]["started"]
+    assert [s["issue"] for s in started] == [issue]
+    assert out["regression_issue_event_replay_is_deduplicated"]["started"] == []
+    assert out["human_labelled_issue_starts_nothing"]["started"] == []
+    assert (
+        "TESTING did not file it"
+        in out["human_labelled_issue_starts_nothing"]["skipped_in_flight"][0]["reason"]
+    )
+    assert out["report_after_regression_files_nothing_new"]["regressions_filed"] == []
+    assert out["issue_comment_ledger"][f"#{issue}"] == [
+        "**Regression lineage**",
+        "**Remediation session started**",
+    ]
 
 
 def test_simulate_every_fifth_merge(registry, monkeypatch):
@@ -705,9 +730,9 @@ def test_simulate_every_fifth_merge(registry, monkeypatch):
     counted = out["merges_counted_not_verified"]
     assert [c["merge_index"] for c in counted] == [1, 2, 3, 4]
     assert all("of 5" in c["reason"] for c in counted)
-    assert out["merge_reduce"]["merge_index"] == 5 and out["merge_reduce"]["session_id"]
-    assert out["merge_reduce"]["base_sha"] == "fc110d8428f35249a2092778ca0a3e26a2de0b14"
-    assert out["merge_reduce"]["closes"] == [5]
+    assert out["merge_testing"]["merge_index"] == 5 and out["merge_testing"]["session_id"]
+    assert out["merge_testing"]["base_sha"] == "fc110d8428f35249a2092778ca0a3e26a2de0b14"
+    assert out["merge_testing"]["closes"] == [5]
     assert out["metrics"]["sessions_with_merged_pr"] == 1
 
 
@@ -792,7 +817,20 @@ def fail_verification(devin, gh, registry):
     return session_id
 
 
-def test_failed_verification_files_an_issue_and_starts_its_fix(registry, world):
+def do_autopr_for(devin, gh, registry, issue_number, *, action="labeled"):
+    event = issue_event(gh.get_issue(REPO, issue_number), REPO, action=action)
+    return run_autopr(
+        devin=devin,
+        gh=gh,
+        registry=registry,
+        target_repo=REPO,
+        automation_repo=AUTO,
+        ready_label="ready",
+        event=event,
+    )
+
+
+def test_failed_verification_files_a_labelled_issue_and_its_event_starts_the_fix(registry, world):
     devin, gh = world
     session_id = fail_verification(devin, gh, registry)
 
@@ -800,17 +838,88 @@ def test_failed_verification_files_an_issue_and_starts_its_fix(registry, world):
     assert len(filed) == 1
     entry = filed[0]
     assert entry["pr"] == 14 and entry["probes"] == ["issue_5/unit"] and entry["depth"] == 1
+    assert "session_id" not in entry
 
     issue = gh.issues[entry["issue"]]
-    assert {label["name"] for label in issue["labels"]} == {"regression", "automation"}
+    assert {label["name"] for label in issue["labels"]} == {"sda-regression", "regression"}
     assert "pull/14" in issue["body"] and "simulated pytest summary" in issue["body"]
     assert session_id in issue["body"]
+    assert not [s for s in devin.sessions.values() if "sda-regression" in s["tags"]]
 
-    fix = devin.sessions[entry["session_id"]]
+    autopr = do_autopr_for(devin, gh, registry, entry["issue"])
+    assert autopr.trigger == "github:issues" and len(autopr.started) == 1
+    fix = devin.sessions[autopr.started[0]["session_id"]]
     assert set(fix["tags"]) == {"sda-fix", "sda-regression", f"issue-{entry['issue']}"}
     assert fix["structured_output_schema"]["title"] == "SupersetFixResult"
     assert f"#{entry['issue']}" in fix["prompt"] and "issue_5/unit" in fix["prompt"]
     assert "Closes #" in fix["prompt"]
+    started = find(IssueLedger(gh, REPO).read(entry["issue"]), "session_started")
+    assert started[-1].data["trigger"] == "github:issues"
+
+
+def test_testing_with_wait_publishes_the_verdict_and_files_the_regression_itself(registry, world):
+    devin, gh = world
+
+    def finish(_seconds):
+        for sid, s in devin.sessions.items():
+            if "sda-verify" in s["tags"] and s["structured_output"] is None:
+                devin.advance(sid, outcome="failed", acus=5.0)
+
+    report = run_testing(
+        devin=devin,
+        gh=gh,
+        registry=registry,
+        target_repo=REPO,
+        automation_repo=AUTO,
+        event=load_event(),
+        every_n=1,
+        wait=True,
+        sleep=finish,
+    )
+    assert report.verdict == "acceptance NOT met" and report.posted_to == [14]
+    assert report.regression_filed and report.regression_filed["pr"] == 14
+    assert "Verification session finished: acceptance NOT met" in gh.comments[14][-2]["body"]
+    assert "Regression filed" in gh.comments[14][-1]["body"]
+    # REPORT finds nothing left to do for that verification
+    rerun = do_report(devin, gh)
+    assert rerun.regressions_filed == [] and all(p["kind"] != "verify" for p in rerun.posted)
+
+
+def test_autopr_ignores_issue_events_the_loop_did_not_file(registry, world):
+    devin, gh = world
+    human = gh.create_issue(REPO, "flaky test", "please look", ["sda-regression"])
+    report = do_autopr_for(devin, gh, registry, human["number"])
+    assert report.started == [] and "TESTING did not file it" in report.skipped_in_flight[0]["reason"]
+    assert not devin.sessions
+
+    unlabelled = gh.create_issue(REPO, "typo", "", ["bug"])
+    with pytest.raises(NotARegressionIssue):
+        extract_regression_issue(issue_event(unlabelled, REPO, action="opened", label="bug"))
+    with pytest.raises(NotARegressionIssue):
+        do_autopr_for(devin, gh, registry, human["number"], action="closed")
+
+    other_repo = {**issue_event(human, REPO), "repository": {"full_name": "someone/else"}}
+    report = run_autopr(
+        devin=devin,
+        gh=gh,
+        registry=registry,
+        target_repo=REPO,
+        automation_repo=AUTO,
+        ready_label="ready",
+        event=other_repo,
+    )
+    assert report.started == [] and "someone/else" in report.skipped_in_flight[0]["reason"]
+
+
+def test_one_regression_issue_event_starts_one_fix_session_however_often_it_replays(registry, world):
+    devin, gh = world
+    fail_verification(devin, gh, registry)
+    issue = do_report(devin, gh).regressions_filed[0]["issue"]
+    first = do_autopr_for(devin, gh, registry, issue, action="opened")
+    replay = do_autopr_for(devin, gh, registry, issue)
+    assert len(first.started) == 1 and replay.started == []
+    assert "holds the slot" in replay.skipped_in_flight[0]["reason"]
+    assert len([s for s in devin.sessions.values() if "sda-regression" in s["tags"]]) == 1
 
 
 def test_a_failure_is_only_filed_once(registry, world):
@@ -828,7 +937,7 @@ def fail_verification_at_every_n_5(devin, gh, registry):
     gh.close_completed(5)
     for i in range(1, 6):
         ev = merge_event(gh, 200 + i, branch="main", sha=f"{i:040x}")
-        r = run_reduce_n(devin, gh, registry, ev, branch="main", n=5)
+        r = run_testing_n(devin, gh, registry, ev, branch="main", n=5)
     assert r.merge_index == 5 and r.window_prs == [201, 202, 203, 204, 205] and r.session_id
     devin.advance(r.session_id, outcome="failed", acus=5.0)
     return r
@@ -849,7 +958,8 @@ def test_one_failed_verification_at_every_n_5_files_one_issue_and_one_fix(regist
     new_issues = set(gh.issues) - issues_before
     assert new_issues == {filed["issue"]}
     fixes = [s for s in devin.sessions.values() if "sda-regression" in s["tags"]]
-    assert len(fixes) == 1 and fixes[0]["session_id"] == filed["session_id"]
+    assert fixes == []
+    assert len(do_autopr_for(devin, gh, registry, filed["issue"]).started) == 1
 
     issue = gh.issues[filed["issue"]]
     assert "PR #205" in issue["title"]
@@ -906,7 +1016,8 @@ def test_metrics_track_regression_issues_and_their_prs(registry, world):
     devin, gh = world
     fail_verification(devin, gh, registry)
     filed = do_report(devin, gh).regressions_filed[0]
-    devin.advance(filed["session_id"], outcome="ok", acus=2.0, pr_url="https://github.com/x/y/pull/7")
+    fix_session = do_autopr_for(devin, gh, registry, filed["issue"]).started[0]["session_id"]
+    devin.advance(fix_session, outcome="ok", acus=2.0, pr_url="https://github.com/x/y/pull/7")
 
     summary = metrics.collect(devin, deflections=0, days=30, acu_usd=2.5)
     assert summary.regression_issues == 1 and summary.regression_fix_prs == 1
