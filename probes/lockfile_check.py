@@ -19,7 +19,6 @@
 Usage: lockfile_check.py <superset_src> <rule> ...
 
 Rules (all must hold; exit 0 only when every rule passes):
-  min:<pkg>:<floor>[:<ceiling>]        every resolved copy of <pkg> is >= floor (and < ceiling)
   not-in:<pkg>:<lo>:<hi>               no resolved copy of <pkg> has lo <= version < hi
   path-min:<node_modules path>:<floor>[:<ceiling>]   the entry at that exact path is in range
   override-floor:<override key>:<dep>:<floor>
@@ -65,10 +64,15 @@ class Checker:
         kind, _, rest = rule.partition(":")
         if kind == "any-of":
             a, _, b = rest.partition("|")
-            return self.check(a) or self.check(b)
+            # a branch that loses while the other wins is not a failure of the rule
+            mark = len(self.failures)
+            if self.check(a):
+                return True
+            if self.check(b):
+                del self.failures[mark:]
+                return True
+            return False
         parts = rest.split(":")
-        if kind == "min":
-            return self._min(parts[0], parts[1], parts[2] if len(parts) > 2 else None)
         if kind == "not-in":
             return self._not_in(parts[0], parts[1], parts[2])
         if kind == "path-min":
@@ -85,16 +89,6 @@ class Checker:
         if v < parse_version(floor):
             return False
         return ceiling is None or v < parse_version(ceiling)
-
-    def _min(self, pkg: str, floor: str, ceiling: str | None) -> bool:
-        copies = resolved_copies(self.lock, pkg)
-        if not copies:
-            self.failures.append(f"min: no resolved copies of {pkg}")
-            return False
-        bad = {p: v for p, v in copies.items() if not self._in_range(v, floor, ceiling)}
-        if bad:
-            self.failures.append(f"min: {pkg} outside [{floor},{ceiling}) at {bad}")
-        return not bad
 
     def _not_in(self, pkg: str, lo: str, hi: str) -> bool:
         copies = resolved_copies(self.lock, pkg)

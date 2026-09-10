@@ -42,6 +42,7 @@ def do_map(devin, gh, registry):
 
 
 def do_reduce(devin, gh, registry, event=None):
+    """REDUCE at every_n=1 against the single-merge fixture, so one event is one verification."""
     return run_reduce(
         devin=devin,
         gh=gh,
@@ -49,6 +50,7 @@ def do_reduce(devin, gh, registry, event=None):
         target_repo=REPO,
         automation_repo=AUTO,
         event=event or load_event(),
+        every_n=1,
     )
 
 
@@ -265,6 +267,69 @@ def test_reduce_verifies_every_nth_merge_into_selected_branch(registry, world):
     assert r.window_prs == [106, 107, 108, 109, 110]
 
 
+def verify_sessions(devin):
+    return [s for s in devin.sessions.values() if "sda-verify" in s["tags"]]
+
+
+def test_cadence_holds_across_windows_at_every_n_5(registry, world):
+    devin, gh = world
+    gh.branch_heads["main"] = "a" * 40
+    shas = {i: f"{i:040x}" for i in range(1, 16)}
+    reports = {}
+    for i in range(1, 16):
+        ev = merge_event(gh, 300 + i, branch="main", sha=shas[i])
+        reports[i] = run_reduce_n(devin, gh, registry, ev, branch="main", n=5)
+    assert [reports[i].merge_index for i in range(1, 16)] == list(range(1, 16))
+    verified = sorted(i for i, r in reports.items() if r.session_id)
+    assert verified == [5, 10, 15]
+    for i in range(1, 16):
+        if i % 5:
+            assert reports[i].session_id is None and "of 5" in reports[i].skipped_reason
+    assert len(verify_sessions(devin)) == 3
+    # each window is the five merges ending at the trigger, BASE is the head before the window
+    assert reports[5].window_prs == [301, 302, 303, 304, 305] and reports[5].base_sha == "a" * 40
+    assert reports[10].window_prs == [306, 307, 308, 309, 310] and reports[10].base_sha == shas[5]
+    assert reports[15].window_prs == [311, 312, 313, 314, 315] and reports[15].base_sha == shas[10]
+    assert reports[15].merge_commit_sha == shas[15]
+
+
+def test_cadence_verification_runs_when_the_window_closes_no_issue(registry, world):
+    """The cadence is unconditional: a window with no `Closes #n` still gets the full suite."""
+    devin, gh = world
+    gh.branch_heads["main"] = "a" * 40
+    gh.close_completed(7)  # a fix already landed; its probes are the regression suite
+    for i in range(1, 6):
+        ev = merge_event(gh, 400 + i, branch="main", sha=f"{i:040x}", body="chore: nothing closed")
+        r = run_reduce_n(devin, gh, registry, ev, branch="main", n=5)
+    assert r.merge_index == 5 and r.closes == [] and r.session_id
+    assert r.regression_issues == [7]
+    prompt = devin.sessions[r.session_id]["prompt"]
+    assert "issue_7/unit" in prompt and '--regression "7"' in prompt
+    assert len(verify_sessions(devin)) == 1
+
+
+def test_cadence_window_covers_every_merge_between_base_and_head(registry, world):
+    devin, gh = world
+    gh.branch_heads["main"] = "a" * 40
+    gh.close_completed(7)
+    shas = {i: f"{i:040x}" for i in range(1, 11)}
+    for i in range(1, 11):
+        ev = merge_event(gh, 500 + i, branch="main", sha=shas[i])
+        r = run_reduce_n(devin, gh, registry, ev, branch="main", n=5)
+        if i == 5:
+            first = r
+    second = r
+    # BASE..HEAD of each verification is exactly the first-parent chain of its window
+    for report, lo in ((first, 1), (second, 6)):
+        chain, sha = [], report.merge_commit_sha
+        while sha != report.base_sha:
+            chain.append(sha)
+            sha = gh.get_commit_parents(REPO, sha)[0]
+        assert chain[::-1] == [shas[i] for i in range(lo, lo + 5)]
+        assert report.window_prs == [500 + i for i in range(lo, lo + 5)]
+    assert second.base_sha == first.merge_commit_sha
+
+
 def test_reduce_replay_does_not_recount_and_other_branches_do_not_count(registry, world):
     devin, gh = world
     gh.branch_heads["main"] = "a" * 40
@@ -291,11 +356,11 @@ def test_verify_settings_from_environment(monkeypatch):
     monkeypatch.delenv("VERIFY_BRANCH", raising=False)
     monkeypatch.delenv("VERIFY_EVERY_N_MERGES", raising=False)
     s = load_settings(simulate=True)
-    assert s.verify_branch == "master" and s.verify_every_n_merges == 1
+    assert s.verify_branch == "master" and s.verify_every_n_merges == 5
     monkeypatch.setenv("VERIFY_BRANCH", "main")
-    monkeypatch.setenv("VERIFY_EVERY_N_MERGES", "5")
+    monkeypatch.setenv("VERIFY_EVERY_N_MERGES", "3")
     s = load_settings(simulate=True)
-    assert s.verify_branch == "main" and s.verify_every_n_merges == 5
+    assert s.verify_branch == "main" and s.verify_every_n_merges == 3
     monkeypatch.setenv("VERIFY_EVERY_N_MERGES", "0")
     with pytest.raises(SystemExit):
         load_settings(simulate=True)
@@ -422,6 +487,7 @@ def test_map_and_reduce_run_with_and_without_playbook_ids(registry, world, caplo
         target_repo=REPO,
         automation_repo=AUTO,
         event=load_event(),
+        every_n=1,
         playbook_id="pb-v",
     )
     assert r2.session_id is not None
@@ -755,6 +821,49 @@ def test_a_failure_is_only_filed_once(registry, world):
     assert find(IssueLedger(gh, REPO).read(14), "regression_filed", issue=first.regressions_filed[0]["issue"])
 
 
+def fail_verification_at_every_n_5(devin, gh, registry):
+    """Five merges into main; the fifth triggers a verification that fails at HEAD."""
+    gh.branch_heads["main"] = "a" * 40
+    gh.close_completed(5)
+    for i in range(1, 6):
+        ev = merge_event(gh, 200 + i, branch="main", sha=f"{i:040x}")
+        r = run_reduce_n(devin, gh, registry, ev, branch="main", n=5)
+    assert r.merge_index == 5 and r.window_prs == [201, 202, 203, 204, 205] and r.session_id
+    devin.advance(r.session_id, outcome="failed", acus=5.0)
+    return r
+
+
+def test_one_failed_verification_at_every_n_5_files_one_issue_and_one_fix(registry, world):
+    devin, gh = world
+    reduce_report = fail_verification_at_every_n_5(devin, gh, registry)
+    issues_before = set(gh.issues)
+
+    report = do_report(devin, gh)
+    # the verdict still lands on every PR in the window
+    assert [p["thread"] for p in report.posted] == [201, 202, 203, 204, 205]
+    # but the failure is remediated exactly once
+    assert len(report.regressions_filed) == 1
+    filed = report.regressions_filed[0]
+    assert filed["pr"] == 205 and filed["window"] == [201, 202, 203, 204, 205]
+    new_issues = set(gh.issues) - issues_before
+    assert new_issues == {filed["issue"]}
+    fixes = [s for s in devin.sessions.values() if "sda-regression" in s["tags"]]
+    assert len(fixes) == 1 and fixes[0]["session_id"] == filed["session_id"]
+
+    issue = gh.issues[filed["issue"]]
+    assert "PR #205" in issue["title"]
+    for n in range(201, 206):
+        assert f"pull/{n}" in issue["body"]
+    assert reduce_report.base_sha in issue["body"] and reduce_report.merge_commit_sha in issue["body"]
+
+    # and a rerun finds the marker, whatever thread it reads
+    assert do_report(devin, gh).regressions_filed == []
+    ledger = IssueLedger(gh, REPO)
+    assert find(ledger.read(205), "regression_filed", session_id=reduce_report.session_id)
+    assert len([s for s in devin.sessions.values() if "sda-regression" in s["tags"]]) == 1
+    assert set(gh.issues) - issues_before == new_issues
+
+
 def test_a_regression_chain_stops_after_two_automated_attempts(registry, world):
     devin, gh = world
     fail_verification(devin, gh, registry)
@@ -843,7 +952,7 @@ class CountingDevin:
 
     def __init__(self, inner):
         self.inner = inner
-        self.calls = Counter()
+        self.calls: Counter[str] = Counter()
 
     def create_session(self, body):
         self.calls["create_session"] += 1
@@ -877,7 +986,7 @@ class CountingDevin:
 class CountingGitHub:
     def __init__(self, inner):
         self.inner = inner
-        self.calls = Counter()
+        self.calls: Counter[str] = Counter()
 
     def list_issues(self, repo, labels, state="open"):
         self.calls["list_issues"] += 1

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
-REGISTRY = Path(__file__).resolve().parent.parent / "probes" / "registry.json"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from orchestrator.registry import load_registry  # noqa: E402
 
 
 def parse_numbers(csv: str) -> list[int]:
@@ -20,16 +21,15 @@ def main() -> int:
     ap.add_argument("--regression", default="")
     args = ap.parse_args()
     wanted = parse_numbers(args.issues) + parse_numbers(args.regression)
-    registry = json.loads(REGISTRY.read_text())
     seen: set[str] = set()
-    for issue in registry["issues"]:
-        if issue["number"] not in wanted:
+    for issue in load_registry().issues:
+        if issue.number not in wanted:
             continue
-        for probe in issue["probes"]:
-            if probe["id"] in seen:
+        for probe in issue.probes:
+            if probe.id in seen:
                 continue
-            seen.add(probe["id"])
-            sys.stdout.write(f"{issue['number']}\t{probe['id']}\t{probe['kind']}\t{probe['script']}\n")
+            seen.add(probe.id)
+            sys.stdout.write(f"{issue.number}\t{probe.id}\t{probe.kind}\t{probe.script}\n")
     return 0
 
 

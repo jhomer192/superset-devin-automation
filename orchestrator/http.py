@@ -18,9 +18,6 @@ RETRY_STATUSES = {429, 500, 502, 503, 504}
 class HttpError(RuntimeError):
     def __init__(self, status: int, url: str, body: str) -> None:
         super().__init__(f"HTTP {status} for {url}: {body[:500]}")
-        self.status = status
-        self.url = url
-        self.body = body
 
 
 def request_json(

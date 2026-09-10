@@ -35,10 +35,6 @@ class Triage:
     reason: Reason
     detail: str
 
-    @property
-    def deflected(self) -> bool:
-        return self.decision is Decision.DEFLECT
-
 
 _DEPENDENCY_MARKERS = (
     re.compile(r"package-lock\.json", re.I),

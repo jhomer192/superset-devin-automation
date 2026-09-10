@@ -140,7 +140,7 @@ from mutable state:
 
 ```
 VERIFY_BRANCH=main            # only PRs merged into this branch count (default: master)
-VERIFY_EVERY_N_MERGES=5       # verify when count % 5 == 0 (default: 1 = every merge)
+VERIFY_EVERY_N_MERGES=5       # verify when count % n == 0 (default: 5)
 ```
 
 On each event, `run_reduce` lists the PRs merged into `VERIFY_BRANCH` (`GET /pulls?state=closed&base=…`,
@@ -203,13 +203,13 @@ Every v3 endpoint this loop calls, all under `/v3/organizations/{org_id}` (`orch
 | `POST /sessions`, `GET /sessions/{id}`, `GET /sessions` | start fix/verification sessions, dedup on live sessions |
 | `GET /automations`, `POST /automations`, `PUT /automations/{id}` | `register` (idempotent by name) |
 | `GET /playbooks`, `POST /playbooks`, `PUT /playbooks/{id}` | `register-playbooks` (idempotent by title); payload is `PlaybookCreateRequest` |
-| `GET /metrics/sessions`, `GET /sessions/insights`, `GET /consumption/daily/sessions/{id}` | `metrics` |
+| `GET /metrics/sessions`, `GET /metrics/prs`, `GET /consumption/daily/sessions/{id}` | `metrics` |
 
 ## Observability
 
 `python -m orchestrator metrics --days N` (`orchestrator/metrics.py`) queries
 `GET /metrics/sessions` (`time_after`/`time_before`), `GET /sessions` filtered to
-`origin=automation`, `GET /sessions/insights`, and
+`origin=automation`, and
 `GET /consumption/daily/sessions/{session_id}` for each automation session, then reports:
 
 | number | meaning | limitation |
@@ -252,16 +252,19 @@ next run.
 
 A verification whose structured output says `acceptance_met == false` has found a probe that
 fails on a commit already on `master`. REPORT files that verdict as work
-(`orchestrator/regression.py`): it opens an issue on the target repo labelled
-`regression`/`automation` carrying the PR, the HEAD and BASE SHAs, the probe table with both exit
-codes and the captured evidence, then starts a fix session tagged `sda-fix`/`sda-regression` for
-it. That session must reproduce the failure before touching anything, make the smallest fix, add
+(`orchestrator/regression.py`): it opens one issue on the target repo labelled
+`regression`/`automation` naming the PR whose merge triggered the verification, listing every PR
+in the verified window (any of them could be the cause), the HEAD and BASE SHAs, the probe table
+with both exit codes and the captured evidence, then starts one fix session tagged
+`sda-fix`/`sda-regression` for it. The verdict comment still lands on every PR thread in the
+window; only the remediation is once per failed verification, whatever the cadence. That session must reproduce the failure before touching anything, make the smallest fix, add
 a test, and run the probes and the surrounding unit tests before opening its PR — and when that
 PR merges, REDUCE verifies it like any other. The probes are the contract in both directions:
 the issue states they must not be edited or relaxed.
 
-Two things keep the loop finite. A `regression_filed` marker on the PR thread means the failure
-already has an issue, so re-running REPORT files nothing. And each filed issue records its
+Two things keep the loop finite. A `regression_filed` marker keyed by the verification session,
+found on any PR thread in the window, means the failure already has an issue, so re-running
+REPORT files nothing. And each filed issue records its
 `regression_depth`; a PR that closes a regression issue inherits it, so after `MAX_CHAIN_DEPTH`
 failed automated attempts on the same chain the run writes `regression_escalated` on the PR and
 stops instead of spending ACUs in a cycle.

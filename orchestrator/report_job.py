@@ -6,13 +6,14 @@ would otherwise only exist inside the session's structured output. This job poll
 for finished `sda-fix` / `sda-verify` sessions and writes one ledger comment per session onto the
 issue or PR it belongs to, then appends a metrics digest at most once per `digest_every_hours`.
 
-A verification that failed also becomes work: REPORT files a regression issue on the target repo
-and starts the fix session for it (see `regression`), whose PR re-enters the same loop when it
-merges.
+A verification that failed also becomes work: REPORT files one regression issue on the target
+repo and starts one fix session for it (see `regression`), whose PR re-enters the same loop when
+it merges. The verdict comment goes on every PR of the verified window; the remediation happens
+once per failed verification, anchored on the PR that triggered it.
 
 Reporting is idempotent the same way the rest of the loop is: a `session_reported` marker keyed by
 session id already on the thread means the outcome has been published, and a `regression_filed`
-marker means the failure already has an issue.
+marker keyed by session id on any PR of the window means the failure already has an issue.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from .devin_api import DevinClient
 from .github_api import GitHubClient
 from .ledger import IssueLedger, LedgerEntry, find
 from .metrics import FIX_TAG, VERIFY_TAG, MetricsReport
+from .reduce_job import TRIGGER_TAG_PREFIX
 from .regression import MAX_CHAIN_DEPTH, chain_depth, file_regression
 from .sessions import is_finished
 
@@ -179,6 +181,38 @@ def _acus(devin: DevinClient, session: dict[str, Any], cache: dict[str, float]) 
     return total
 
 
+@dataclass(frozen=True)
+class VerificationScope:
+    """What one verification session covered: the merge that triggered it and the window."""
+
+    trigger_pr: int
+    window_prs: list[int]
+    head_sha: str
+    base_sha: str | None
+
+
+def verification_scope(session: dict[str, Any], ledger: IssueLedger, window: list[int]) -> VerificationScope:
+    """Resolve the scope from the session's tags and REDUCE's `verification_started` record.
+
+    The trigger is the `trigger-pr-<n>` tag; the range comes from the ledger entry REDUCE wrote
+    on that thread, falling back to the session's own structured output.
+    """
+    session_id = str(session.get("session_id"))
+    triggers = _tagged_numbers(session, TRIGGER_TAG_PREFIX)
+    # the trigger is the newest merge of the window, so an untagged session resolves to the same PR
+    trigger = triggers[-1] if triggers else max(window)
+    output = session.get("structured_output") or {}
+    head, base = str(output.get("head_sha") or ""), output.get("base_sha")
+    window_prs = list(window)
+    for entry in find(ledger.read(trigger), "verification_started", session_id=session_id):
+        head = str(entry.data.get("head") or head)
+        base = entry.data.get("base") or base
+        recorded = entry.data.get("window")
+        if recorded:
+            window_prs = [int(n) for n in recorded]
+    return VerificationScope(trigger, window_prs, head, base)
+
+
 def _remediate(
     *,
     devin: DevinClient,
@@ -187,15 +221,20 @@ def _remediate(
     target_repo: str,
     automation_repo: str,
     session: dict[str, Any],
-    pr_number: int,
+    scope: VerificationScope,
     report: ReportReport,
 ) -> None:
-    """Turn one failed verification into an issue plus the session that fixes it."""
+    """Turn one failed verification into exactly one issue plus the one session that fixes it."""
     session_id = str(session.get("session_id"))
-    if find(ledger.read(pr_number), "regression_filed", session_id=session_id):
+    pr_number = scope.trigger_pr
+    if any(
+        find(ledger.read(n), "regression_filed", session_id=session_id)
+        for n in {pr_number, *scope.window_prs}
+    ):
         return
     pr_url = f"https://github.com/{target_repo}/pull/{pr_number}"
-    depth = chain_depth(gh, ledger, target_repo, pr_number) + 1
+    # any merge in the window may be the cause, so the chain is as deep as its deepest member
+    depth = max(chain_depth(gh, ledger, target_repo, n) for n in {pr_number, *scope.window_prs}) + 1
     if depth > MAX_CHAIN_DEPTH:
         ledger.append(
             pr_number,
@@ -219,6 +258,9 @@ def _remediate(
         session=session,
         pr_number=pr_number,
         pr_url=pr_url,
+        window_prs=scope.window_prs,
+        head_sha=scope.head_sha,
+        base_sha=scope.base_sha,
         depth=depth,
     )
     ledger.append(
@@ -231,12 +273,14 @@ def _remediate(
                 "issue": filed["issue"],
                 "fix_session_id": filed["session_id"],
                 "depth": depth,
+                "window": list(scope.window_prs),
             },
         ),
         [
             f"issue: {filed['issue_url']}",
             f"fix session: `{filed['session_id']}`",
             f"failing probes: {', '.join(filed['probes'])}",
+            f"window: {', '.join(f'#{n}' for n in scope.window_prs)}",
         ],
     )
     report.regressions_filed.append({"pr": pr_number, **filed})
@@ -309,18 +353,17 @@ def run_report(
             report.posted.append({"thread": number, "kind": kind, "session_id": session_id})
             log.info("REPORT: %s session %s -> #%d", kind, session_id, number)
 
-        if kind == "verify" and _is_regression(session.get("structured_output")):
-            for number in threads:
-                _remediate(
-                    devin=devin,
-                    gh=gh,
-                    ledger=ledger,
-                    target_repo=target_repo,
-                    automation_repo=automation_repo,
-                    session=session,
-                    pr_number=number,
-                    report=report,
-                )
+        if kind == "verify" and threads and _is_regression(session.get("structured_output")):
+            _remediate(
+                devin=devin,
+                gh=gh,
+                ledger=ledger,
+                target_repo=target_repo,
+                automation_repo=automation_repo,
+                session=session,
+                scope=verification_scope(session, ledger, threads),
+                report=report,
+            )
 
     if digest_issue is not None and _digest_due(
         ledger.read(digest_issue), end, timedelta(hours=digest_every_hours)

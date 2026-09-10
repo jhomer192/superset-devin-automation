@@ -6,9 +6,14 @@ any other piece of work it owns: an issue with binding acceptance criteria, then
 whose verdict is a probe exit code. The filed issue is tagged into the fix session so REPORT
 publishes its outcome and the metrics count it with every other fix.
 
+A verification covers a window of merges and is tagged onto every PR in it, but one failure is
+one piece of work: exactly one issue and one fix session per failed verification, whatever the
+cadence. The issue names the PR whose merge triggered the verification and lists the whole window,
+since any merge in it may be the cause.
+
 The issue number is not known until GitHub assigns it, so idempotency is anchored on the PR
-thread instead: a `regression_filed` marker carrying the verification session id means this
-failure has already been turned into an issue.
+threads instead: a `regression_filed` marker carrying the verification session id on any PR of
+the window means this failure has already been turned into an issue.
 """
 
 from __future__ import annotations
@@ -85,6 +90,7 @@ def issue_body(
     target_repo: str,
     automation_repo: str,
     pr_url: str,
+    window_prs: list[int],
     head_sha: str,
     base_sha: str | None,
     items: list[Failure],
@@ -100,7 +106,8 @@ def issue_body(
         for f in items
         if f.evidence
     )
-    return f"""Filed automatically by the regression verification of {pr_url}.
+    window = "\n".join(f"- https://github.com/{target_repo}/pull/{n}" for n in window_prs)
+    return f"""Filed automatically by the regression verification triggered by {pr_url}.
 
 The merged commit `{head_sha}` fails a probe that must pass. Verification session: {session_url}
 
@@ -109,6 +116,13 @@ The merged commit `{head_sha}` fails a probe that must pass. Verification sessio
 {rows}
 
 BASE commit: `{base_sha or "unknown"}`
+
+## Verification window
+
+Every merge between BASE and HEAD is a candidate cause; the triggering PR is only the one that
+hit the cadence:
+
+{window}
 
 ## Acceptance criteria
 
@@ -152,9 +166,16 @@ def file_regression(
     session: dict[str, Any],
     pr_number: int,
     pr_url: str,
+    window_prs: list[int],
+    head_sha: str,
+    base_sha: str | None,
     depth: int = 0,
 ) -> dict[str, Any]:
-    """Open a regression issue for a failed verification and start the session that fixes it."""
+    """Open one regression issue for a failed verification and start the session that fixes it.
+
+    `pr_number` is the merge that triggered the verification; `window_prs` is every merge it
+    covered, `head_sha`/`base_sha` the range it ran against.
+    """
     output = session.get("structured_output") or {}
     items = failures(output)
     session_url = str(session.get("url") or session.get("session_id"))
@@ -165,8 +186,9 @@ def file_regression(
             target_repo=target_repo,
             automation_repo=automation_repo,
             pr_url=pr_url,
-            head_sha=str(output.get("head_sha") or ""),
-            base_sha=output.get("base_sha"),
+            window_prs=window_prs,
+            head_sha=head_sha,
+            base_sha=base_sha,
             items=items,
             session_url=session_url,
         ),
@@ -183,7 +205,7 @@ def file_regression(
                 issue_number=number,
                 issue_url=issue_url,
                 pr_url=pr_url,
-                head_sha=str(output.get("head_sha") or ""),
+                head_sha=head_sha,
                 probes=[f.probe for f in items],
             ),
             "title": f"Fix regression {target_repo}#{number} from {pr_url}",
@@ -204,6 +226,7 @@ def file_regression(
                 "session_id": fix_id,
                 "kind": "fix",
                 "regression_of": pr_url,
+                "window": list(window_prs),
                 "depth": depth,
             },
         ),
@@ -225,4 +248,5 @@ def file_regression(
         "session_id": fix_id,
         "probes": [f.probe for f in items],
         "depth": depth,
+        "window": list(window_prs),
     }
