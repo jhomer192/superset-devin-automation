@@ -273,7 +273,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--simulate", action="store_true", help="in-memory clients, no API keys needed")
     sub = parser.add_subparsers(dest="command", required=True)
     p_autopr = sub.add_parser(
-        "autopr", help="issue event: fix session for that regression issue; no event: sweep the `ready` issues"
+        "autopr", help="issue event: fix session for that regression issue; no event: sweep `ready` issues"
     )
     p_autopr.add_argument("--event-json", type=Path, default=None)
     p_autopr.add_argument(
