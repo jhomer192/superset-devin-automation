@@ -43,11 +43,15 @@ issues yourself; the orchestrator does that.
 """
 
 
-def map_payload(target_repo: str, automation_repo: str) -> dict[str, Any]:
+def _env_prefix(name: str, playbook_id: str | None) -> str:
+    return f"{name}={playbook_id} " if playbook_id else ""
+
+
+def map_payload(target_repo: str, automation_repo: str, playbook_id_fix: str | None = None) -> dict[str, Any]:
     prompt = (
         _shim(
             automation_repo,
-            "python -m orchestrator map",
+            _env_prefix("PLAYBOOK_ID_FIX", playbook_id_fix) + "python -m orchestrator map",
             "   DEVIN_API_KEY, DEVIN_ORG_ID, GITHUB_TOKEN (already in the environment as session secrets)",
         )
         + f"\nTarget repository for issues: @{target_repo}\n"
@@ -56,7 +60,11 @@ def map_payload(target_repo: str, automation_repo: str) -> dict[str, Any]:
         "name": MAP_NAME,
         "enabled": True,
         "run_as": {"type": "organization"},
-        "metadata": {"component": "map", "target_repo": target_repo},
+        "metadata": {
+            "component": "map",
+            "target_repo": target_repo,
+            "playbook_id_fix": playbook_id_fix or "",
+        },
         "triggers": [
             {
                 "event_type": "schedule:recurring",
@@ -77,13 +85,18 @@ def map_payload(target_repo: str, automation_repo: str) -> dict[str, Any]:
 
 
 def reduce_payload(
-    target_repo: str, automation_repo: str, verify_branch: str = "master", every_n: int = 1
+    target_repo: str,
+    automation_repo: str,
+    verify_branch: str = "master",
+    every_n: int = 1,
+    playbook_id_verify: str | None = None,
 ) -> dict[str, Any]:
     prompt = (
         _shim(
             automation_repo,
             f"VERIFY_BRANCH={verify_branch} VERIFY_EVERY_N_MERGES={every_n} "
-            "python -m orchestrator reduce --event-json event.json  "
+            + _env_prefix("PLAYBOOK_ID_VERIFY", playbook_id_verify)
+            + "python -m orchestrator reduce --event-json event.json  "
             "(first write the appended pull_request event payload to event.json, unmodified)",
             "   DEVIN_API_KEY, DEVIN_ORG_ID, GITHUB_TOKEN (already in the environment as session secrets)",
         )
@@ -100,6 +113,7 @@ def reduce_payload(
             "target_repo": target_repo,
             "verify_branch": verify_branch,
             "verify_every_n_merges": str(every_n),
+            "playbook_id_verify": playbook_id_verify or "",
         },
         "triggers": [
             {
@@ -153,10 +167,11 @@ def assert_no_ceilings(payload: dict[str, Any]) -> None:
     flat = json.dumps(payload)
     for forbidden in ("max_acu_limit", "timeout", "max_turns", "turn_cap"):
         if forbidden in flat:
-            raise ValueError(f"forbidden ceiling {forbidden!r} present in automation payload")
-    if any(a.get("type") == "monitor_session" for a in payload["actions"]):
+            raise ValueError(f"forbidden ceiling {forbidden!r} present in payload")
+    actions = payload.get("actions", [])
+    if any(a.get("type") == "monitor_session" for a in actions):
         raise ValueError("monitor_session is deprecated for new automations")
-    if sum(1 for a in payload["actions"] if a.get("type") == "start_session") > 1:
+    if sum(1 for a in actions if a.get("type") == "start_session") > 1:
         raise ValueError("at most one start_session action")
 
 
@@ -167,14 +182,16 @@ def register(
     *,
     verify_branch: str = "master",
     every_n: int = 1,
+    playbook_id_fix: str | None = None,
+    playbook_id_verify: str | None = None,
     dry_run: bool = False,
 ) -> list[dict[str, Any]]:
     """Create MAP and REDUCE, or update them in place if automations with the same name exist."""
     results: list[dict[str, Any]] = []
     existing = {a.get("name"): a for a in devin.list_automations()} if not dry_run else {}
     payloads = (
-        map_payload(target_repo, automation_repo),
-        reduce_payload(target_repo, automation_repo, verify_branch, every_n),
+        map_payload(target_repo, automation_repo, playbook_id_fix),
+        reduce_payload(target_repo, automation_repo, verify_branch, every_n, playbook_id_verify),
     )
     for payload in payloads:
         errors = validate_payload(payload)

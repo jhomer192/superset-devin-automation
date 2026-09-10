@@ -1,4 +1,4 @@
-"""CLI: python -m orchestrator {map,reduce,metrics,register,simulate} [--simulate]"""
+"""CLI: python -m orchestrator {map,reduce,metrics,register,register-playbooks,simulate} [--simulate]"""
 
 from __future__ import annotations
 
@@ -6,10 +6,11 @@ import argparse
 import json
 import logging
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from . import automations, metrics
+from . import automations, metrics, playbooks
 from .config import Settings, load_settings
 from .devin_api import DevinClient, LiveDevinClient
 from .github_api import GitHubClient, LiveGitHubClient
@@ -45,6 +46,7 @@ def cmd_map(settings: Settings, devin: DevinClient, gh: GitHubClient, registry: 
         target_repo=settings.target_repo,
         automation_repo=settings.automation_repo,
         ready_label=settings.ready_label,
+        playbook_id=settings.playbook_id_fix,
     ).as_dict()
 
 
@@ -68,6 +70,7 @@ def cmd_reduce(
         event=event,
         verify_branch=settings.verify_branch,
         every_n=settings.verify_every_n_merges,
+        playbook_id=settings.playbook_id_verify,
     ).as_dict()
 
 
@@ -86,8 +89,16 @@ def cmd_register(settings: Settings, devin: DevinClient, dry_run: bool) -> list[
         settings.automation_repo,
         verify_branch=settings.verify_branch,
         every_n=settings.verify_every_n_merges,
+        playbook_id_fix=settings.playbook_id_fix,
+        playbook_id_verify=settings.playbook_id_verify,
         dry_run=dry_run,
     )
+
+
+def cmd_register_playbooks(devin: DevinClient, dry_run: bool) -> dict[str, Any]:
+    results = playbooks.register(devin, dry_run=dry_run)
+    ids = playbooks.lookup_ids(devin) if not dry_run else {}
+    return {"playbooks": results, "env": ids}
 
 
 def cmd_simulate(settings: Settings, registry: Registry) -> dict[str, Any]:
@@ -149,6 +160,24 @@ def cmd_simulate(settings: Settings, registry: Registry) -> dict[str, Any]:
         {"name": r["name"], "triggers": r["payload"]["triggers"]}
         for r in cmd_register(settings, devin, dry_run=True)
     ]
+    # Playbooks: the loop above ran with whatever PLAYBOOK_ID_* the environment had (unset means
+    # the inline fallback). Register them into the fake org twice to show title idempotence, then
+    # run a fresh MAP with the ids so the @playbook: token path is exercised as well.
+    ids = cmd_register_playbooks(devin, dry_run=False)["env"]
+    cmd_register_playbooks(devin, dry_run=False)
+    out["playbooks_registered"] = ids
+    out["playbooks_reregister_is_idempotent"] = len(devin.list_playbooks()) == 2
+    with_playbooks = replace(
+        settings, playbook_id_fix=ids["PLAYBOOK_ID_FIX"], playbook_id_verify=ids["PLAYBOOK_ID_VERIFY"]
+    )
+    devin2, gh2 = FakeDevin(), FakeGitHub.from_fixtures()
+    map_with = cmd_map(with_playbooks, devin2, gh2, registry)
+    out["map_with_playbook"] = {
+        "started": len(map_with["started"]),
+        "prompts_carry_playbook_token": all(
+            f"@playbook:{ids['PLAYBOOK_ID_FIX']}" in str(s["prompt"]) for s in devin2.sessions.values()
+        ),
+    }
     out["issue_comment_ledger"] = {
         f"#{n}": [c["body"].splitlines()[0] for c in cs] for n, cs in sorted(gh.comments.items())
     }
@@ -167,6 +196,10 @@ def main(argv: list[str] | None = None) -> int:
     p_metrics.add_argument("--days", type=int, default=30)
     p_reg = sub.add_parser("register", help="create/update the MAP and REDUCE automations")
     p_reg.add_argument("--dry-run", action="store_true")
+    p_pb = sub.add_parser(
+        "register-playbooks", help="create/update the remediation and verification playbooks"
+    )
+    p_pb.add_argument("--dry-run", action="store_true")
     sub.add_parser("simulate", help="run the full loop offline against fixtures")
     args = parser.parse_args(argv)
 
@@ -180,19 +213,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "simulate":
         result = cmd_simulate(settings, registry)
     else:
-        if args.command == "register" and not args.dry_run and settings.simulate:
-            raise SystemExit("register without --dry-run needs live credentials")
-        devin, gh = (
-            _clients(settings)
-            if not (args.command == "register" and args.dry_run)
-            else (FakeDevin(), FakeGitHub())
-        )
+        registering = args.command in {"register", "register-playbooks"}
+        if registering and not args.dry_run and settings.simulate:
+            raise SystemExit(f"{args.command} without --dry-run needs live credentials")
+        devin, gh = _clients(settings) if not (registering and args.dry_run) else (FakeDevin(), FakeGitHub())
         if args.command == "map":
             result = cmd_map(settings, devin, gh, registry)
         elif args.command == "reduce":
             result = cmd_reduce(settings, devin, gh, registry, args.event_json)
         elif args.command == "metrics":
             result = cmd_metrics(settings, devin, gh, registry, args.days)
+        elif args.command == "register-playbooks":
+            result = cmd_register_playbooks(devin, args.dry_run)
         else:
             result = cmd_register(settings, devin, args.dry_run)
     json.dump(result, sys.stdout, indent=2, default=str)

@@ -29,6 +29,12 @@ class DevinClient(Protocol):
 
     def update_automation(self, automation_id: str, body: JSON) -> JSON: ...
 
+    def list_playbooks(self) -> list[JSON]: ...
+
+    def create_playbook(self, body: JSON) -> JSON: ...
+
+    def update_playbook(self, playbook_id: str, body: JSON) -> JSON: ...
+
     def session_metrics(self, time_after: int, time_before: int) -> JSON: ...
 
     def sessions_insights(self, **params: Any) -> list[JSON]: ...
@@ -49,6 +55,9 @@ class LiveDevinClient:
 
     def _patch(self, path: str, body: JSON) -> Any:
         return request_json("PATCH", f"{self._org}{path}", headers=self._headers, body=body)
+
+    def _put(self, path: str, body: JSON) -> Any:
+        return request_json("PUT", f"{self._org}{path}", headers=self._headers, body=body)
 
     @staticmethod
     def _items(payload: Any) -> list[JSON]:
@@ -87,6 +96,20 @@ class LiveDevinClient:
     # PATCH /v3/organizations/{org_id}/automations/{automation_id}
     def update_automation(self, automation_id: str, body: JSON) -> JSON:
         result: JSON = self._patch(f"/automations/{automation_id}", body)
+        return result
+
+    # GET /v3/organizations/{org_id}/playbooks
+    def list_playbooks(self) -> list[JSON]:
+        return self._items(self._get("/playbooks"))
+
+    # POST /v3/organizations/{org_id}/playbooks  (PlaybookCreateRequest)
+    def create_playbook(self, body: JSON) -> JSON:
+        result: JSON = self._post("/playbooks", body)
+        return result
+
+    # PUT /v3/organizations/{org_id}/playbooks/{playbook_id}  (same request body as create)
+    def update_playbook(self, playbook_id: str, body: JSON) -> JSON:
+        result: JSON = self._put(f"/playbooks/{playbook_id}", body)
         return result
 
     # GET /v3/organizations/{org_id}/metrics/sessions  (time_after/time_before are required ints)

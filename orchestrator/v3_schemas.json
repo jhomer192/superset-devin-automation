@@ -1270,6 +1270,137 @@
    "title": "AutomationTriggerRequest",
    "type": "object"
   },
+  "PlaybookCreateRequest": {
+   "properties": {
+    "body": {
+     "title": "Body",
+     "type": "string"
+    },
+    "macro": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Playbook macro identifier. Must start with '!' followed by one or more letters, digits, underscores, or hyphens. Example: '!my_macro' or '!my-macro'",
+     "title": "Macro"
+    },
+    "structured_output_schema": {
+     "anyOf": [
+      {
+       "additionalProperties": true,
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "JSON Schema (Draft 7) that sessions using this playbook will produce as structured output. Max 64KB. Must be self-contained (no external $ref).",
+     "title": "Structured Output Schema"
+    },
+    "title": {
+     "title": "Title",
+     "type": "string"
+    }
+   },
+   "required": [
+    "title",
+    "body"
+   ],
+   "title": "PlaybookCreateRequest",
+   "type": "object"
+  },
+  "PlaybookResponse": {
+   "properties": {
+    "access_type": {
+     "enum": [
+      "enterprise",
+      "org"
+     ],
+     "title": "Access Type",
+     "type": "string"
+    },
+    "body": {
+     "title": "Body",
+     "type": "string"
+    },
+    "created_at": {
+     "title": "Created At",
+     "type": "integer"
+    },
+    "created_by": {
+     "title": "Created By",
+     "type": "string"
+    },
+    "macro": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Macro"
+    },
+    "org_id": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Org Id"
+    },
+    "playbook_id": {
+     "title": "Playbook Id",
+     "type": "string"
+    },
+    "structured_output_schema": {
+     "anyOf": [
+      {
+       "additionalProperties": true,
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Structured Output Schema"
+    },
+    "title": {
+     "title": "Title",
+     "type": "string"
+    },
+    "updated_at": {
+     "title": "Updated At",
+     "type": "integer"
+    },
+    "updated_by": {
+     "title": "Updated By",
+     "type": "string"
+    }
+   },
+   "required": [
+    "playbook_id",
+    "title",
+    "body",
+    "macro",
+    "created_by",
+    "updated_by",
+    "created_at",
+    "updated_at",
+    "access_type",
+    "org_id"
+   ],
+   "title": "PlaybookResponse",
+   "type": "object"
+  },
   "SessionCreateRequest": {
    "properties": {
     "attachment_urls": {

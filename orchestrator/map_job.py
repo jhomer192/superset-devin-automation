@@ -74,8 +74,11 @@ def run_map(
     target_repo: str,
     automation_repo: str,
     ready_label: str,
+    playbook_id: str | None = None,
 ) -> MapReport:
     report = MapReport()
+    if not playbook_id:
+        log.warning("MAP: PLAYBOOK_ID_FIX unset, using the fully inline remediation prompt")
     ledger = IssueLedger(gh, target_repo)
     issues = gh.list_issues(target_repo, labels=ready_label, state="open")
     open_prs = gh.list_pulls(target_repo, state="open")
@@ -112,7 +115,7 @@ def run_map(
 
         session = devin.create_session(
             {
-                "prompt": fix_session_prompt(target_repo, automation_repo, issue, spec),
+                "prompt": fix_session_prompt(target_repo, automation_repo, issue, spec, playbook_id),
                 "title": f"Fix {target_repo}#{number}: {spec.title[:80]}",
                 "tags": [FIX_TAG, f"issue-{number}"],
                 "structured_output_schema": FIX_SCHEMA,

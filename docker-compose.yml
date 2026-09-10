@@ -13,6 +13,8 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       VERIFY_BRANCH: ${VERIFY_BRANCH:-master}
       VERIFY_EVERY_N_MERGES: ${VERIFY_EVERY_N_MERGES:-1}
+      PLAYBOOK_ID_FIX: ${PLAYBOOK_ID_FIX:-}
+      PLAYBOOK_ID_VERIFY: ${PLAYBOOK_ID_VERIFY:-}
     volumes:
       - ./events:/events:ro
     command: ["simulate"]

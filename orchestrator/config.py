@@ -21,6 +21,8 @@ class Settings:
     ready_label: str
     verify_branch: str
     verify_every_n_merges: int
+    playbook_id_fix: str | None
+    playbook_id_verify: str | None
     simulate: bool
     log_level: str
 
@@ -73,6 +75,8 @@ def load_settings(simulate: bool = False) -> Settings:
         ready_label=env.get("READY_LABEL", "ready"),
         verify_branch=env.get("VERIFY_BRANCH", "master"),
         verify_every_n_merges=every,
+        playbook_id_fix=env.get("PLAYBOOK_ID_FIX") or None,
+        playbook_id_verify=env.get("PLAYBOOK_ID_VERIFY") or None,
         simulate=simulate or env.get("SIMULATE", "").lower() in {"1", "true", "yes"},
         log_level=env.get("LOG_LEVEL", "INFO"),
     )

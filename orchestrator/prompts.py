@@ -1,37 +1,38 @@
-"""Session prompts. ``@owner/repo`` tokens are what the API derives ``repos`` from (read-only)."""
+"""Session prompts.
+
+``@owner/repo`` and ``@playbook:{id}`` tokens are what the API derives the read-only ``repos``
+and ``playbook_id`` session fields from. Each prompt has two parts: the invariant workflow
+(``*_playbook_body``, published as an org playbook by ``orchestrator/playbooks.py``) and the
+per-session variables. With a playbook id the prompt is the token plus the variables; without
+one the body is inlined so the loop keeps working when no playbook is registered.
+"""
 
 from __future__ import annotations
 
 from .registry import IssueSpec, Probe
 
-
-def fix_session_prompt(
-    target_repo: str, automation_repo: str, issue: dict[str, object], spec: IssueSpec
-) -> str:
-    probes = "\n".join(f"  - {p.id} ({p.kind}): probes/run.sh {p.id}" for p in spec.probes)
-    return f"""@{target_repo}
-
-Fix GitHub issue #{spec.number} in {target_repo}: {spec.title}
-
-Issue URL: {issue.get("html_url", f"https://github.com/{target_repo}/issues/{spec.number}")}
-Cited condition: {spec.condition}
+FIX_PLAYBOOK_BODY = """\
+You are fixing one GitHub issue in the target repository named in the prompt. The prompt gives
+the issue number, title, URL, cited condition and the deciding probes; everything below is the
+same on every run.
 
 Read the full issue body and its comments first; the acceptance criteria there are binding.
 
-Deciding probes live in https://github.com/{automation_repo} (clone it next to the superset checkout):
-{probes}
+The probes live in the automation repository named in the prompt; clone it next to the target
+checkout. Each probe is run as `probes/run.sh <probe-id>` with SUPERSET_SRC pointing at the target
+checkout and PROBE_PYTHON at the venv python.
 
 Workflow:
-1. Clone {target_repo} at master. Create a branch. Install requirements/development.txt into a venv.
-2. Before changing anything, run each probe above with SUPERSET_SRC pointing at your checkout and
-   PROBE_PYTHON at the venv python. Every probe MUST exit non-zero at this point. Record the exit
-   codes; they go in base_probe_exit_code.
+1. Clone the target repository at master. Create a branch. Install requirements/development.txt
+   into a venv.
+2. Before changing anything, run each deciding probe. Every probe MUST exit non-zero at this
+   point. Record the exit codes; they go in base_probe_exit_code.
 3. Implement the fix following the issue's acceptance criteria. Keep the change minimal. Follow
-   AGENTS.md in the superset repo (ASF headers, type hints, pre-commit on changed files).
-4. Re-run each probe. Every probe MUST exit 0. Do not edit anything under the probes/ tree of
-   {automation_repo}; if a probe is wrong, stop and report status "error" with the reason.
-5. Open a pull request against {target_repo} master whose body contains the line
-   "Closes #{spec.number}". PR title in Conventional Commits form. No AI-attribution footers
+   AGENTS.md in the target repository (ASF headers, type hints, pre-commit on changed files).
+4. Re-run each probe. Every probe MUST exit 0. Do not edit anything under the probes/ tree of the
+   automation repository; if a probe is wrong, stop and report status "error" with the reason.
+5. Open a pull request against the target repository's master whose body contains the line
+   "Closes #<issue number>". PR title in Conventional Commits form. No AI-attribution footers
    anywhere (no Co-Authored-By, no "Generated with").
 
 Structured output rules (enforced by schema):
@@ -42,40 +43,23 @@ Structured output rules (enforced by schema):
 acceptance_met is the probe's exit code being 0, nothing else.
 """
 
-
-def verification_prompt(
-    target_repo: str,
-    automation_repo: str,
-    head_sha: str,
-    base_sha: str,
-    pr_url: str,
-    issue_numbers: list[int],
-    probes: list[Probe],
-) -> str:
-    probe_lines = "\n".join(f"  - {p.id} ({p.kind})" for p in probes) if probes else "  (none)"
-    issues = ", ".join(f"#{n}" for n in issue_numbers) or "none referenced"
-    return f"""@{target_repo}
-
-Regression verification for {pr_url} (merged into master of {target_repo}).
-
-HEAD (merged commit): {head_sha}
-BASE (first parent):  {base_sha}
-Issues this PR closes: {issues}
-Probes to run (from probes/registry.json in {automation_repo}):
-{probe_lines}
+VERIFY_PLAYBOOK_BODY = """\
+You are verifying that a range of merges into the target repository introduced no regressions.
+The prompt gives the target and automation repositories, the HEAD and BASE commits, the PR that
+triggered the run, the issues in the range and the probes; everything below is the same on
+every run.
 
 Do exactly this; the verdict comes from exit codes, not from your reading of the code:
 
-1. git clone https://github.com/{automation_repo} automation && cd automation
-2. Run:
-     verify/run_all.sh --repo {target_repo} --head {head_sha} --base {base_sha} \\
-       --issues "{",".join(str(n) for n in issue_numbers)}"
-   This script clones {target_repo} at HEAD and at BASE, stands up a real Postgres and Redis in
-   docker, installs Python requirements, runs `npm ci && npm run build` in superset-frontend,
-   boots Superset against Postgres and waits for `/health`, then runs every probe at HEAD and
-   again at BASE and writes verify/out/result.json. It exits 0 only if the build and boot
-   succeeded and every probe for the closed issues passes at HEAD and MUST FAIL at BASE (a probe
-   that already passes at BASE proves nothing and fails the verification).
+1. git clone the automation repository into ./automation and cd into it.
+2. Run the verify/run_all.sh command line given in the prompt
+   (--repo, --head, --base, --issues). The script clones the target repository at HEAD and at
+   BASE, stands up a real Postgres and Redis in docker, installs Python requirements, runs
+   `npm ci && npm run build` in superset-frontend, boots Superset against Postgres and waits for
+   `/health`, then runs every probe at HEAD and again at BASE and writes verify/out/result.json.
+   It exits 0 only if the build and boot succeeded and every probe for the closed issues passes
+   at HEAD and MUST FAIL at BASE (a probe that already passes at BASE proves nothing and fails
+   the verification).
 3. Copy verify/out/result.json into the structured output verbatim where fields overlap:
    - status "ok" when the script produced a result file (even if acceptance_met is false).
    - acceptance_met = the script's overall verdict (exit code 0).
@@ -87,5 +71,62 @@ Do exactly this; the verdict comes from exit codes, not from your reading of the
    - status "error" with error_message only when the script could not run at all (no result
      file). Do NOT include acceptance_met in that case.
 Do not modify anything under probes/ or verify/ in the automation checkout, and do not patch the
-superset checkout; if a probe cannot run, report status "error". Do not open a PR.
+target checkout; if a probe cannot run, report status "error". Do not open a PR.
 """
+
+
+def _header(target_repo: str, playbook_id: str | None) -> str:
+    return f"@{target_repo}" + (f" @playbook:{playbook_id}" if playbook_id else "")
+
+
+def fix_session_prompt(
+    target_repo: str,
+    automation_repo: str,
+    issue: dict[str, object],
+    spec: IssueSpec,
+    playbook_id: str | None = None,
+) -> str:
+    probes = "\n".join(f"  - {p.id} ({p.kind}): probes/run.sh {p.id}" for p in spec.probes)
+    variables = f"""\
+Fix GitHub issue #{spec.number} in {target_repo}: {spec.title}
+
+Issue URL: {issue.get("html_url", f"https://github.com/{target_repo}/issues/{spec.number}")}
+Cited condition: {spec.condition}
+Automation repository (probes): https://github.com/{automation_repo}
+Deciding probes:
+{probes}
+"""
+    body = "" if playbook_id else "\n" + FIX_PLAYBOOK_BODY
+    return f"{_header(target_repo, playbook_id)}\n\n{variables}{body}"
+
+
+def verification_command(target_repo: str, head_sha: str, base_sha: str, issue_numbers: list[int]) -> str:
+    issues = ",".join(str(n) for n in issue_numbers)
+    return f'verify/run_all.sh --repo {target_repo} --head {head_sha} --base {base_sha} --issues "{issues}"'
+
+
+def verification_prompt(
+    target_repo: str,
+    automation_repo: str,
+    head_sha: str,
+    base_sha: str,
+    pr_url: str,
+    issue_numbers: list[int],
+    probes: list[Probe],
+    playbook_id: str | None = None,
+) -> str:
+    probe_lines = "\n".join(f"  - {p.id} ({p.kind})" for p in probes) if probes else "  (none)"
+    issues = ", ".join(f"#{n}" for n in issue_numbers) or "none referenced"
+    variables = f"""\
+Regression verification for {pr_url} (merged into {target_repo}).
+
+HEAD (merged commit): {head_sha}
+BASE:                 {base_sha}
+Issues in range: {issues}
+Automation repository: https://github.com/{automation_repo}
+Command: {verification_command(target_repo, head_sha, base_sha, issue_numbers)}
+Probes to run (from probes/registry.json in the automation repository):
+{probe_lines}
+"""
+    body = "" if playbook_id else "\n" + VERIFY_PLAYBOOK_BODY
+    return f"{_header(target_repo, playbook_id)}\n\n{variables}{body}"

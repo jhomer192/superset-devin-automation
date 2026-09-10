@@ -98,6 +98,7 @@ def run_reduce(
     event: dict[str, Any],
     verify_branch: str = "master",
     every_n: int = 1,
+    playbook_id: str | None = None,
 ) -> ReduceReport:
     pr = extract_merged_pr(event)
     pr_url = str(pr["html_url"])
@@ -165,6 +166,8 @@ def run_reduce(
     probes: list[Probe] = registry.probes_for(closes)
     regression_probes: list[Probe] = registry.probes_for(regression)
 
+    if not playbook_id:
+        log.warning("REDUCE: PLAYBOOK_ID_VERIFY unset, using the fully inline verification prompt")
     prompt = verification_prompt(
         target_repo,
         automation_repo,
@@ -173,6 +176,7 @@ def run_reduce(
         pr_url,
         closes,
         probes + regression_probes,
+        playbook_id,
     )
     if regression:
         prompt += (
