@@ -60,6 +60,49 @@ same `@playbook:{id}` token plus `REGRESSION_FIX_ADDENDUM` (reproduce first, rep
 `no_change_needed` if the probes already pass, add a regression test and run its directory).
 Without `PLAYBOOK_ID_FIX` the full workflow (`REGRESSION_FIX_BODY`) is inlined instead.
 
+## Run it
+
+### Offline, no keys (`simulate`)
+
+```bash
+docker compose up            # builds the image and runs `python -m orchestrator simulate`
+# or, without docker:
+pip install -e . && python -m orchestrator simulate
+```
+
+`simulate` swaps the Devin and GitHub clients for in-memory fakes seeded from `fixtures/`
+(a snapshot of the fork's issues and a merged-PR webhook body) and walks the loop: a merged-PR
+event starts one verification and posts its verdict on every PR of the window; a failing
+verification files one `sda-regression` issue and starts one fix session for it; a replayed
+event posts nothing twice; the manual `autopr` sweep triages the `ready` backlog; the
+automation and playbook payloads are dry-run validated. Every structured output the fakes emit
+is validated against the same schemas live sessions get (`orchestrator/schema.py`), so the
+simulation cannot pass with a payload a real session would be rejected for.
+
+### Live
+
+```bash
+cp .env.example .env         # fill DEVIN_API_KEY, DEVIN_ORG_ID, GITHUB_TOKEN, VERIFY_BRANCH, VERIFY_EVERY_N_MERGES
+docker compose run --rm orchestrator register-playbooks --dry-run   # print validated playbook payloads
+docker compose run --rm orchestrator register-playbooks   # create/update both playbooks; prints PLAYBOOK_ID_*
+# put the printed PLAYBOOK_ID_FIX / PLAYBOOK_ID_VERIFY in .env, then:
+docker compose run --rm orchestrator register --dry-run   # print the validated automation payload
+docker compose run --rm orchestrator register             # create/update find-and-fix (the shim carries the ids)
+docker compose run --rm orchestrator find-and-fix --event-json /events/pr.json   # one merged-PR event, by hand
+docker compose run --rm orchestrator autopr --wait        # the manual sweep of the `ready` backlog
+```
+
+Inside a Devin session the same values are available as the org secret
+`superset_remediation_bot` (Devin API key, service user `superset-remediation-bot`) and the
+secret `superset_github` (GitHub PAT for `jhomer192`). Sessions the automation starts read
+those two names, so both must have org access, and the Devin GitHub app must be installed on the
+target repository (or `github:pull_request` never fires) and on this one (or the shim's clone is
+refused). `register` and `register-playbooks` are idempotent: they update by automation name /
+playbook title (`PUT`) rather than creating duplicates.
+
+Secrets come from environment variables only; `.env.example` ships with empty values and
+`.env` is git-ignored. `orchestrator/config.py` is the complete list of settings.
+
 ## How a fix session is decided (AUTOPR)
 
 On a `github:issues` event (`run_autopr_for_issue` in `orchestrator/autopr_job.py`): the event
