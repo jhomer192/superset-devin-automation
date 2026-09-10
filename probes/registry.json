@@ -67,6 +67,13 @@
         "probes": [
           "prd/health"
         ]
+      },
+      {
+        "id": "PRD-DEP-1",
+        "title": "Frontend lockfile carries no known-vulnerable brace-expansion",
+        "probes": [
+          "issue_12/lockfile"
+        ]
       }
     ]
   },

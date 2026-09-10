@@ -39,3 +39,4 @@ every verification; a failing probe files a regression issue naming the requirem
 | PRD-CHART-1 | Chart history versioning keeps one record per save | `issue_11/unit` |
 | PRD-CHART-2 | Custom-tag filters do not corrupt the rison query | `issue_7/unit` |
 | PRD-OPS-1 | Health endpoint | `prd/health` |
+| PRD-DEP-1 | Frontend lockfile carries no known-vulnerable brace-expansion | `issue_12/lockfile` |

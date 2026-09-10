@@ -48,7 +48,6 @@ class Failure:
     probe: str
     issue: int | None
     head_exit_code: int | None
-    base_exit_code: int | None
     evidence: str
     requirements: tuple[str, ...] = ()
 
@@ -61,7 +60,6 @@ def failures(output: dict[str, Any]) -> list[Failure]:
             probe=str(r.get("probe")),
             issue=r.get("issue"),
             head_exit_code=r.get("head_exit_code"),
-            base_exit_code=r.get("base_exit_code"),
             evidence=str(r.get("evidence") or ""),
             requirements=tuple(str(x) for x in r.get("requirements") or []),
         )
@@ -76,7 +74,6 @@ def failures(output: dict[str, Any]) -> list[Failure]:
             probe=str(output.get("probe_command") or "verify/run_all.sh"),
             issue=None,
             head_exit_code=output.get("probe_exit_code"),
-            base_exit_code=None,
             evidence=str(output.get("evidence") or ""),
         )
     ]
@@ -87,8 +84,8 @@ def issue_title(pr_number: int, items: list[Failure]) -> str:
     more = f" (+{len(items) - 1} more)" if len(items) > 1 else ""
     reqs = sorted({r for f in items for r in f.requirements})
     if reqs:
-        return f"Regression on merged PR #{pr_number}: {', '.join(reqs)} violated at HEAD ({first}{more})"
-    return f"Regression on merged PR #{pr_number}: probe {first} fails at HEAD{more}"
+        return f"PRD violated after PR #{pr_number}: {', '.join(reqs)} ({first}{more})"
+    return f"PRD verification failed after PR #{pr_number}: {first}{more}"
 
 
 def issue_body(
@@ -98,14 +95,11 @@ def issue_body(
     pr_url: str,
     window_prs: list[int],
     head_sha: str,
-    base_sha: str | None,
     items: list[Failure],
     session_url: str,
 ) -> str:
     rows = "\n".join(
-        f"| {f.probe} | {', '.join(f.requirements) or '-'} | {f.issue or '-'} "
-        f"| {f.base_exit_code if f.base_exit_code is not None else '-'} | {f.head_exit_code} |"
-        for f in items
+        f"| {f.probe} | {', '.join(f.requirements) or '-'} | {f.head_exit_code} |" for f in items
     )
     evidence = "\n\n".join(
         f"<details><summary>{f.probe}</summary>\n\n```\n{f.evidence[-4000:]}\n```\n</details>"
@@ -113,20 +107,18 @@ def issue_body(
         if f.evidence
     )
     window = "\n".join(f"- https://github.com/{target_repo}/pull/{n}" for n in window_prs)
-    return f"""Filed automatically by the regression verification triggered by {pr_url}.
+    return f"""Filed automatically by the PRD verification triggered by {pr_url}.
 
-The merged commit `{head_sha}` fails a probe that must pass. Verification session: {session_url}
+The merged commit `{head_sha}` fails a probe of a PRD.md requirement. Verification session: {session_url}
 
-| probe | PRD requirement | guards issue | exit at BASE | exit at HEAD |
-|-------|-----------------|--------------|--------------|--------------|
+| probe | PRD requirement | exit code |
+|-------|-----------------|-----------|
 {rows}
-
-BASE commit: `{base_sha or "unknown"}`
 
 ## Verification window
 
-Every merge between BASE and HEAD is a candidate cause; the triggering PR is only the one that
-hit the cadence:
+Every merge in the window is a candidate cause; the triggering PR is only the one that hit the
+cadence:
 
 {window}
 
@@ -173,13 +165,12 @@ def file_regression_issue(
     pr_url: str,
     window_prs: list[int],
     head_sha: str,
-    base_sha: str | None,
     depth: int = 0,
 ) -> dict[str, Any]:
     """Open one regression issue for a failed verification and record what the fix must satisfy.
 
     `pr_number` is the merge that triggered the verification; `window_prs` is every merge it
-    covered, `head_sha`/`base_sha` the range it ran against.
+    covered, `head_sha` the commit it ran against.
     """
     output = session.get("structured_output") or {}
     items = failures(output)
@@ -193,7 +184,6 @@ def file_regression_issue(
             pr_url=pr_url,
             window_prs=window_prs,
             head_sha=head_sha,
-            base_sha=base_sha,
             items=items,
             session_url=session_url,
         ),
