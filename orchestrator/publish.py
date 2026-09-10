@@ -169,6 +169,14 @@ def verification_scope(session: dict[str, Any], ledger: IssueLedger, window: lis
     return VerificationScope(trigger, window_prs, head, base)
 
 
+def existing_regression_issue(gh: GitHubClient, target_repo: str, session_id: str) -> int | None:
+    """The regression issue already filed for this verification session, found by its body."""
+    for issue in gh.list_issues(target_repo, "regression", state="all"):
+        if session_id in str(issue.get("body") or ""):
+            return int(issue["number"])
+    return None
+
+
 def remediate(
     *,
     gh: GitHubClient,
@@ -185,10 +193,23 @@ def remediate(
     """
     session_id = str(session.get("session_id"))
     pr_number = scope.trigger_pr
+    threads = {pr_number, *scope.window_prs}
     if any(
-        find(ledger.read(n), "regression_filed", session_id=session_id)
-        for n in {pr_number, *scope.window_prs}
+        find(ledger.read(n), kind, session_id=session_id)
+        for n in threads
+        for kind in ("regression_filed", "regression_escalated")
     ):
+        return None
+    existing = existing_regression_issue(gh, target_repo, session_id)
+    if existing is not None:
+        # a concurrent publisher (TESTING and REPORT can both see the same finished session) got
+        # there first; adopt its issue so the marker exists on the next read
+        ledger.append(
+            pr_number,
+            "Regression already filed",
+            LedgerEntry("regression_filed", data={"session_id": session_id, "issue": existing}),
+            [f"#{existing} already covers this verification"],
+        )
         return None
     pr_url = f"https://github.com/{target_repo}/pull/{pr_number}"
     # any merge in the window may be the cause, so the chain is as deep as its deepest member

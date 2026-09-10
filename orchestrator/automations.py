@@ -286,15 +286,13 @@ def register(
     digest_every_hours: int = 24,
     dry_run: bool = False,
 ) -> list[dict[str, Any]]:
-    """Create the automations, or update them in place if ones with the same name exist; delete
-    the ones registered under retired names so a merge cannot fire two verifications."""
+    """Create the automations, or update them in place if ones with the same name exist.
+
+    The ones registered under retired names are deleted last, once every replacement is in place,
+    so a failure part-way leaves the old chain running rather than nothing.
+    """
     results: list[dict[str, Any]] = []
     existing = {a.get("name"): a for a in devin.list_automations()} if not dry_run else {}
-    for name in RETIRED_NAMES:
-        old = existing.get(name)
-        if old and old.get("automation_id"):
-            devin.delete_automation(str(old["automation_id"]))
-            results.append({"name": name, "deleted": True})
     payloads = (
         testing_payload(target_repo, automation_repo, verify_branch, every_n, playbook_id_verify),
         autopr_payload(target_repo, automation_repo, playbook_id_fix),
@@ -314,4 +312,9 @@ def register(
             results.append(devin.update_automation(str(current["automation_id"]), update))
         else:
             results.append(devin.create_automation(payload))
+    for name in RETIRED_NAMES:
+        old = existing.get(name)
+        if old and old.get("automation_id"):
+            devin.delete_automation(str(old["automation_id"]))
+            results.append({"name": name, "deleted": True})
     return results

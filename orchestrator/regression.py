@@ -192,7 +192,7 @@ def file_regression_issue(
             items=items,
             session_url=session_url,
         ),
-        list(REGRESSION_LABELS),
+        [label for label in REGRESSION_LABELS if label != REGRESSION_LABEL],
     )
     number = int(issue["number"])
     issue_url = str(issue.get("html_url") or f"https://github.com/{target_repo}/issues/{number}")
@@ -213,6 +213,8 @@ def file_regression_issue(
         ),
         [f"chain depth {depth} of {MAX_CHAIN_DEPTH}", f"deciding probes: {', '.join(probes)}"],
     )
+    # the trigger label goes on last: its github:issues event runs AUTOPR, which needs the record
+    gh.add_labels(target_repo, number, [REGRESSION_LABEL])
     log.info("regression #%d filed for %s", number, pr_url)
     return {
         "issue": number,

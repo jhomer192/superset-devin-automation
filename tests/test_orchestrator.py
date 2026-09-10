@@ -677,6 +677,48 @@ def test_register_is_idempotent_by_name():
     assert len(devin.automations) == 3
 
 
+class OrderedDevin(FakeDevin):
+    def __init__(self) -> None:
+        super().__init__()
+        self.order: list[str] = []
+        self.fail_create = False
+
+    def create_automation(self, body):
+        if self.fail_create:
+            raise RuntimeError("api down")
+        self.order.append("create")
+        return super().create_automation(body)
+
+    def delete_automation(self, automation_id: str) -> None:
+        self.order.append("delete")
+        super().delete_automation(automation_id)
+
+
+def with_retired_automations(devin):
+    for name in automations.RETIRED_NAMES:
+        devin.create_automation({"name": name})
+    devin.order.clear()
+    return devin
+
+
+def test_register_deletes_retired_automations_only_after_the_replacements_exist():
+    devin = with_retired_automations(OrderedDevin())
+    results = automations.register(devin, REPO, AUTO)
+    assert devin.order == ["create"] * 3 + ["delete"] * 2
+    assert {a["name"] for a in devin.automations.values()} == {
+        automations.TESTING_NAME,
+        automations.AUTOPR_NAME,
+        automations.REPORT_NAME,
+    }
+    assert [r["name"] for r in results if r.get("deleted")] == list(automations.RETIRED_NAMES)
+
+    failing = with_retired_automations(OrderedDevin())
+    failing.fail_create = True
+    with pytest.raises(RuntimeError):
+        automations.register(failing, REPO, AUTO)
+    assert {a["name"] for a in failing.automations.values()} == set(automations.RETIRED_NAMES)
+
+
 def test_report_automation_is_hourly_and_carries_the_digest_issue():
     payload = automations.report_payload(REPO, AUTO, 42, digest_every_hours=6)
     trigger = payload["triggers"][0]
@@ -1003,6 +1045,44 @@ def test_a_regression_chain_stops_after_two_automated_attempts(registry, world):
     assert depths[1].regressions_filed == []
     assert [(e["pr"], e["depth"]) for e in depths[1].escalated] == [(102, 3)]
     assert "a human needs to look at it" in gh.comments[102][-1]["body"]
+
+    comments_before = len(gh.comments[102])
+    rerun = do_report(devin, gh)
+    assert rerun.escalated == [] and rerun.regressions_filed == []
+    assert len(gh.comments[102]) == comments_before
+
+
+class LabelWatcher(FakeGitHub):
+    seen_at_label_time: dict[int, list[str]] = {}
+
+    def add_labels(self, repo: str, number: int, labels: list[str]) -> None:
+        self.seen_at_label_time[number] = [c["body"] for c in self.comments.get(number, [])]
+        super().add_labels(repo, number, labels)
+
+
+def test_the_trigger_label_is_added_after_the_lineage_record(registry):
+    devin, gh = FakeDevin(), LabelWatcher.from_fixtures()
+    seen_at_label_time = LabelWatcher.seen_at_label_time
+    fail_verification(devin, gh, registry)
+    issue = do_report(devin, gh).regressions_filed[0]["issue"]
+    assert any("regression_depth" in body for body in seen_at_label_time[issue])
+    assert {lb["name"] for lb in gh.issues[issue]["labels"]} == {"sda-regression", "regression"}
+
+
+def test_a_regression_already_filed_by_another_publisher_is_adopted_not_duplicated(registry, world):
+    devin, gh = world
+    session_id = fail_verification(devin, gh, registry)
+    # the other publisher's issue exists, but its regression_filed marker has not landed yet
+    for n in list(gh.comments):
+        gh.comments[n] = [
+            c for c in gh.comments[n] if "regression_filed" not in c["body"] and session_id not in c["body"]
+        ]
+    other = gh.create_issue(REPO, "regression", f"Verification session: {session_id}", ["regression"])
+    issues_before = set(gh.issues)
+    report = do_report(devin, gh)
+    assert report.regressions_filed == [] and set(gh.issues) == issues_before
+    adopted = find(IssueLedger(gh, REPO).read(14), "regression_filed", session_id=session_id)
+    assert adopted and adopted[-1].data["issue"] == other["number"]
 
 
 def test_an_errored_verification_is_reported_but_not_filed_as_a_regression(registry, world):

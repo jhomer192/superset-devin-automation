@@ -259,6 +259,10 @@ class FakeGitHub:
         }
         return dict(self.issues[number])
 
+    def add_labels(self, repo: str, number: int, labels: list[str]) -> None:
+        have = {lb["name"] for lb in self.issues[number]["labels"]}
+        self.issues[number]["labels"] += [{"name": name} for name in labels if name not in have]
+
     def list_issue_comments(self, repo: str, number: int) -> list[JSON]:
         return [dict(c) for c in self.comments.get(number, [])]
 

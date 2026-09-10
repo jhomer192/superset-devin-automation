@@ -49,6 +49,8 @@ class GitHubClient(Protocol):
 
     def create_issue(self, repo: str, title: str, body: str, labels: list[str]) -> JSON: ...
 
+    def add_labels(self, repo: str, number: int, labels: list[str]) -> None: ...
+
     def list_issue_comments(self, repo: str, number: int) -> list[JSON]: ...
 
     def create_issue_comment(self, repo: str, number: int, body: str) -> JSON: ...
@@ -105,6 +107,14 @@ class LiveGitHubClient:
             body={"title": title, "body": body, "labels": labels},
         )
         return result
+
+    def add_labels(self, repo: str, number: int, labels: list[str]) -> None:
+        request_json(
+            "POST",
+            f"{self._base}/repos/{repo}/issues/{number}/labels",
+            headers=self._headers,
+            body={"labels": labels},
+        )
 
     def list_issue_comments(self, repo: str, number: int) -> list[JSON]:
         return self._paged(f"/repos/{repo}/issues/{number}/comments", {})
