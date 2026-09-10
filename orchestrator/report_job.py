@@ -6,9 +6,9 @@ would otherwise only exist inside the session's structured output. This job poll
 for finished `sda-fix` / `sda-verify` sessions and writes one ledger comment per session onto the
 issue or PR it belongs to, then appends a metrics digest at most once per `digest_every_hours`.
 
-A verification that failed is not just reported: it is turned back into work. REPORT files a
-regression issue on the target repo and starts the fix session for it (see `regression`), which
-re-enters the same loop through that session's PR.
+A verification that failed also becomes work: REPORT files a regression issue on the target repo
+and starts the fix session for it (see `regression`), whose PR re-enters the same loop when it
+merges.
 
 Reporting is idempotent the same way the rest of the loop is: a `session_reported` marker keyed by
 session id already on the thread means the outcome has been published, and a `regression_filed`
@@ -108,30 +108,49 @@ def _is_regression(output: dict[str, Any] | None) -> bool:
     return output.get("status") == "ok" and output.get("acceptance_met") is False
 
 
-def _cost_line(report: MetricsReport) -> str:
-    if report.estimated_cost_usd is None:
-        return "cost: ACUs only; set ACU_USD to price them"
-    return f"cost: ${report.estimated_cost_usd} at {report.acu_usd} USD/ACU"
+def _num(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:g}"
+
+
+def _cost(report: MetricsReport) -> str:
+    if report.estimated_cost_usd is None or report.acu_usd is None:
+        return "n/a (the API meters ACUs, not money; set ACU_USD to price them)"
+    return f"${report.estimated_cost_usd:g} at {report.acu_usd:g} USD/ACU"
+
+
+def _counts(counts: dict[str, Any]) -> str:
+    return ", ".join(f"{k} {v}" for k, v in counts.items()) or "n/a"
 
 
 def digest_lines(report: MetricsReport) -> list[str]:
-    return [
-        f"window: {report.window_start} .. {report.window_end}",
-        f"sessions: {report.automation_sessions_total} "
-        f"({report.fix_sessions} fix, {report.verify_sessions} verify)",
-        f"merged PRs: {report.sessions_with_merged_pr}, merge rate {report.merge_rate}",
-        f"verification: {report.verification_passes}/{report.verification_runs} passed "
-        f"(rate {report.verification_pass_rate})",
-        f"ACUs: {report.total_acus} total, {report.acu_per_session} per session, "
-        f"{report.acu_per_merged_pr} per merged PR",
-        _cost_line(report),
-        f"org-wide ACUs (all origins): {report.org_total_acus}",
-        f"Devin-authored PRs org-wide: {report.pr_metrics}",
-        f"regressions filed by this loop: {report.regression_issues} "
-        f"({report.regression_fix_prs} fix PRs opened)",
-        f"triage deflections (0 ACU): {report.triage_deflections}",
-        f"liveness: {report.liveness}",
+    """The digest body: a markdown table, so the comment reads as a report and not as a repr."""
+    rows = [
+        ("window", f"{report.window_start} .. {report.window_end}"),
+        (
+            "sessions",
+            f"{report.automation_sessions_total} "
+            f"({report.fix_sessions} fix, {report.verify_sessions} verify)",
+        ),
+        ("merged PRs", f"{report.sessions_with_merged_pr} (merge rate {_num(report.merge_rate)})"),
+        (
+            "verification passed",
+            f"{report.verification_passes}/{report.verification_runs} "
+            f"(rate {_num(report.verification_pass_rate)})",
+        ),
+        ("regressions filed", f"{report.regression_issues} ({report.regression_fix_prs} fix PRs opened)"),
+        ("triage deflections (0 ACU)", str(report.triage_deflections)),
+        ("ACUs (this loop)", _num(report.total_acus)),
+        ("ACUs per session", _num(report.acu_per_session)),
+        ("ACUs per merged PR", _num(report.acu_per_merged_pr)),
+        ("ACUs polling (REPORT itself)", _num(report.polling_acus)),
+        ("ACUs org-wide, all origins", _num(report.org_total_acus)),
+        ("cost", _cost(report)),
+        ("Devin-authored PRs org-wide", _counts(report.pr_metrics)),
+        ("session liveness", _counts(report.liveness)),
     ]
+    table = ["| metric | value |", "|--------|-------|"]
+    table += [f"| {name} | {value} |" for name, value in rows]
+    return table
 
 
 def _digest_due(entries: list[LedgerEntry], now: datetime, every: timedelta) -> bool:
@@ -145,14 +164,19 @@ def _digest_due(entries: list[LedgerEntry], now: datetime, every: timedelta) -> 
     return now - last >= every
 
 
-def _acus(devin: DevinClient, session: dict[str, Any]) -> float | None:
+def _acus(devin: DevinClient, session: dict[str, Any], cache: dict[str, float]) -> float | None:
+    """ACUs for one session, cached so the digest does not re-bill the same lookup."""
     session_id = str(session.get("session_id"))
+    if session_id in cache:
+        return cache[session_id]
     try:
-        return float(devin.session_consumption(session_id).get("total_acus") or 0.0)
+        total = float(devin.session_consumption(session_id).get("total_acus") or 0.0)
     except Exception as exc:  # noqa: BLE001 - a missing consumption row must not block the report
         log.warning("consumption lookup failed for %s: %s", session_id, exc)
         acus = session.get("acus_consumed")
         return float(acus) if acus is not None else None
+    cache[session_id] = total
+    return total
 
 
 def _remediate(
@@ -189,6 +213,7 @@ def _remediate(
     filed = file_regression(
         devin=devin,
         gh=gh,
+        ledger=ledger,
         target_repo=target_repo,
         automation_repo=automation_repo,
         session=session,
@@ -232,13 +257,17 @@ def run_report(
 ) -> ReportReport:
     end = now or datetime.now(UTC)
     start = end - timedelta(days=days)
+    # Tag filtering happens in the query: REPORT starts a session of its own every hour, and
+    # those would otherwise fill the pages this query reads.
     sessions = devin.list_sessions(
         origins="automation",
-        created_after=start.isoformat(timespec="seconds"),
-        created_before=end.isoformat(timespec="seconds"),
+        tags=[FIX_TAG, VERIFY_TAG],
+        created_after=int(start.timestamp()),
+        created_before=int(end.timestamp()),
     )
     ledger = IssueLedger(gh, target_repo)
     report = ReportReport(digest_issue=digest_issue)
+    acu_cache: dict[str, float] = {}
 
     for session in sessions:
         tags = {str(t) for t in session.get("tags") or []}
@@ -253,14 +282,15 @@ def run_report(
             continue
 
         session_id = str(session.get("session_id"))
-        acus = _acus(devin, session)
-        lines = outcome_lines(session, acus)
+        pending = [n for n in threads if not find(ledger.read(n), "session_reported", session_id=session_id)]
+        report.already_reported += len(threads) - len(pending)
+        # ACUs are only needed for a comment that is about to be written, and the lookup is one
+        # HTTP request per session on a job that runs every hour.
+        acus = _acus(devin, session, acu_cache) if pending else None
+        lines = outcome_lines(session, acus) if pending else []
         output = session.get("structured_output") or {}
         verdict = _verdict(session.get("structured_output"))
-        for number in threads:
-            if find(ledger.read(number), "session_reported", session_id=session_id):
-                report.already_reported += 1
-                continue
+        for number in pending:
             ledger.append(
                 number,
                 f"{'Remediation' if kind == 'fix' else 'Verification'} session finished: {verdict}",
@@ -295,7 +325,15 @@ def run_report(
     if digest_issue is not None and _digest_due(
         ledger.read(digest_issue), end, timedelta(hours=digest_every_hours)
     ):
-        summary = metrics.collect(devin, deflections=deflections(), days=days, now=end, acu_usd=acu_usd)
+        summary = metrics.collect(
+            devin,
+            deflections=deflections(),
+            days=days,
+            now=end,
+            acu_usd=acu_usd,
+            sessions=sessions,
+            consumption=acu_cache,
+        )
         ledger.append(
             digest_issue,
             "Automation metrics digest",

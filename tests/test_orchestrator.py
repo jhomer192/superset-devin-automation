@@ -1,11 +1,12 @@
 import copy
 import json
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 
-from orchestrator import automations, metrics
+from orchestrator import automations, devin_api, metrics
 from orchestrator.__main__ import cmd_simulate, count_deflections
 from orchestrator.config import load_settings
 from orchestrator.github_api import closing_issue_numbers
@@ -13,7 +14,8 @@ from orchestrator.ledger import IssueLedger, LedgerEntry, find, parse_entries
 from orchestrator.map_job import run_map
 from orchestrator.reduce_job import NotAMergedPR, extract_merged_pr, run_reduce
 from orchestrator.registry import load_registry
-from orchestrator.report_job import run_report
+from orchestrator.report_job import digest_lines, run_report
+from orchestrator.schema import FIX_SCHEMA
 from orchestrator.sessions import Liveness, classify, holds_slot, is_finished
 from orchestrator.simulate import FakeDevin, FakeGitHub, load_event
 from orchestrator.triage import Decision, Reason
@@ -587,7 +589,7 @@ def test_digest_is_appended_at_most_once_per_interval(world):
     assert not do_report(devin, gh, digest_issue=1, now=now + timedelta(hours=23)).digest_posted
     assert do_report(devin, gh, digest_issue=1, now=now + timedelta(hours=25)).digest_posted
     digests = [c for c in gh.comments[1] if "metrics digest" in c["body"]]
-    assert len(digests) == 2 and "verification:" in digests[0]["body"]
+    assert len(digests) == 2 and "| verification passed |" in digests[0]["body"]
 
 
 # --- self-healing regressions -------------------------------------------------------------------
@@ -708,3 +710,185 @@ def test_collect_requires_base_failure_for_closed_issues_only(tmp_path):
     rows[0]["exit_code"] = 2
     assert build_results(rows, closed={5}, regression=set())[0]["acceptance_met"] is False
     assert build_results(rows[:1], closed={5}, regression=set())[0]["base_exit_code"] is None
+
+
+# --- API cost of a run ---------------------------------------------------------------------------
+
+
+class CountingDevin:
+    """A FakeDevin that tallies its calls, so what a run costs in requests is measurable."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.calls = Counter()
+
+    def create_session(self, body):
+        self.calls["create_session"] += 1
+        return self.inner.create_session(body)
+
+    def get_session(self, session_id):
+        self.calls["get_session"] += 1
+        return self.inner.get_session(session_id)
+
+    def list_sessions(self, **params):
+        self.calls["list_sessions"] += 1
+        return self.inner.list_sessions(**params)
+
+    def session_metrics(self, time_after, time_before):
+        self.calls["session_metrics"] += 1
+        return self.inner.session_metrics(time_after, time_before)
+
+    def pr_metrics(self, time_after, time_before):
+        self.calls["pr_metrics"] += 1
+        return self.inner.pr_metrics(time_after, time_before)
+
+    def session_consumption(self, session_id):
+        self.calls["session_consumption"] += 1
+        return self.inner.session_consumption(session_id)
+
+    def org_consumption(self, time_after, time_before):
+        self.calls["org_consumption"] += 1
+        return self.inner.org_consumption(time_after, time_before)
+
+
+class CountingGitHub:
+    def __init__(self, inner):
+        self.inner = inner
+        self.calls = Counter()
+
+    def list_issues(self, repo, labels, state="open"):
+        self.calls["list_issues"] += 1
+        return self.inner.list_issues(repo, labels, state)
+
+    def get_issue(self, repo, number):
+        self.calls["get_issue"] += 1
+        return self.inner.get_issue(repo, number)
+
+    def create_issue(self, repo, title, body, labels):
+        self.calls["create_issue"] += 1
+        return self.inner.create_issue(repo, title, body, labels)
+
+    def list_issue_comments(self, repo, number):
+        self.calls["list_issue_comments"] += 1
+        return self.inner.list_issue_comments(repo, number)
+
+    def create_issue_comment(self, repo, number, body):
+        self.calls["create_issue_comment"] += 1
+        return self.inner.create_issue_comment(repo, number, body)
+
+    def list_pulls(self, repo, state="open"):
+        self.calls["list_pulls"] += 1
+        return self.inner.list_pulls(repo, state)
+
+    def get_pull(self, repo, number):
+        self.calls["get_pull"] += 1
+        return self.inner.get_pull(repo, number)
+
+    def list_merged_pulls(self, repo, base_branch):
+        self.calls["list_merged_pulls"] += 1
+        return self.inner.list_merged_pulls(repo, base_branch)
+
+    def get_commit_parents(self, repo, sha):
+        self.calls["get_commit_parents"] += 1
+        return self.inner.get_commit_parents(repo, sha)
+
+
+def finished_report_session(devin, *, acus):
+    """What REPORT's own hourly session looks like once it has run."""
+    session = devin.create_session({"prompt": "p", "tags": ["sda-report"]})
+    devin.sessions[session["session_id"]].update({"status": "exit", "acus_consumed": acus})
+    return session
+
+
+def finished_world(registry, world):
+    """The fixture world after a MAP sweep whose sessions have all finished."""
+    devin, gh = world
+    started = do_map(devin, gh, registry).started
+    for i, session in enumerate(started):
+        devin.advance(
+            session["session_id"],
+            outcome="ok",
+            acus=float(i + 1),
+            pr_url=f"https://github.com/jhomer192/superset/pull/{200 + i}",
+        )
+    return devin, gh
+
+
+def test_a_steady_state_report_run_costs_nothing_in_consumption(registry, world):
+    devin, gh = world
+    devin, gh = finished_world(registry, (devin, gh))
+    now = datetime(2026, 1, 31, 12, tzinfo=UTC)
+
+    first_devin, first_gh = CountingDevin(devin), CountingGitHub(gh)
+    assert do_report(first_devin, first_gh, digest_issue=1, now=now).posted
+    # One consumption lookup per session reported, reused by the digest rather than repeated.
+    sessions = len(devin.sessions)
+    assert first_devin.calls["session_consumption"] == sessions
+    assert first_devin.calls["list_sessions"] == 2  # the loop's sessions, then REPORT's own
+
+    steady_devin, steady_gh = CountingDevin(devin), CountingGitHub(gh)
+    steady = do_report(steady_devin, steady_gh, digest_issue=1, now=now + timedelta(hours=1))
+    assert steady.posted == [] and not steady.digest_posted
+    assert steady_devin.calls["session_consumption"] == 0
+    assert steady_gh.calls["create_issue_comment"] == 0
+    # Each thread is listed once per run, not once per check.
+    assert steady_gh.calls["list_issue_comments"] == sessions
+
+
+def test_report_reads_more_than_one_page_of_sessions(registry, world):
+    devin, gh = world
+    for _ in range(150):
+        session = devin.create_session(
+            {"prompt": "p", "tags": ["sda-fix", "issue-5"], "structured_output_schema": FIX_SCHEMA}
+        )
+        devin.advance(session["session_id"], outcome="ok", acus=1.0)
+    noise = finished_report_session(devin, acus=0.4)
+
+    report = do_report(devin, gh, digest_issue=1, now=datetime(2026, 1, 31, 12, tzinfo=UTC))
+    assert len(report.posted) == 150
+    assert noise["session_id"] not in "\n".join(c["body"] for c in gh.comments[5])
+
+
+def test_report_prices_its_own_polling_separately(registry, world):
+    devin, gh = world
+    devin, gh = finished_world(registry, (devin, gh))
+    finished_report_session(devin, acus=0.4)
+
+    summary = metrics.collect(devin, deflections=0, days=30)
+    assert summary.polling_acus == 0.4
+    loop = devin.list_sessions(tags=[metrics.FIX_TAG, metrics.VERIFY_TAG])
+    assert all(metrics.REPORT_TAG not in s["tags"] for s in loop)
+    body = "\n".join(digest_lines(summary))
+    assert "| ACUs polling (REPORT itself) | 0.4 |" in body
+    assert "{" not in body and "None" not in body
+
+
+def test_digest_prints_n_a_rather_than_none(world):
+    devin, _ = world
+    body = "\n".join(digest_lines(metrics.collect(devin, deflections=0, days=30)))
+    assert "| merge rate n/a" in body or "(merge rate n/a)" in body
+    assert "| ACUs per session | n/a |" in body and "None" not in body
+
+
+def test_live_client_follows_the_session_cursor(monkeypatch):
+    pages = [
+        {
+            "items": [{"session_id": f"devin-{i}"} for i in range(devin_api.MAX_PAGE)],
+            "has_next_page": True,
+            "end_cursor": "cursor-2",
+        },
+        {"items": [{"session_id": "devin-tail"}], "has_next_page": False, "end_cursor": None},
+    ]
+    seen = []
+
+    def fake_request(method, url, *, headers=None, params=None, body=None):
+        seen.append(dict(params or {}))
+        return pages[len(seen) - 1]
+
+    monkeypatch.setattr(devin_api, "request_json", fake_request)
+    client = devin_api.LiveDevinClient("https://api.devin.ai", "key", "org-1")
+    sessions = client.list_sessions(origins="automation", tags=["sda-fix", "sda-verify"])
+
+    assert len(sessions) == devin_api.MAX_PAGE + 1
+    assert seen[0]["first"] == 200 and seen[0]["tags"] == ["sda-fix", "sda-verify"]
+    assert "after" not in seen[0] and seen[1]["after"] == "cursor-2"

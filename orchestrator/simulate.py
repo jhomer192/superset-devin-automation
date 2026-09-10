@@ -57,7 +57,12 @@ class FakeDevin:
 
     def list_sessions(self, **params: Any) -> list[JSON]:
         origins = params.get("origins")
-        return [dict(s) for s in self.sessions.values() if not origins or s["origin"] == origins]
+        tags = {str(t) for t in params.get("tags") or []}
+        return [
+            dict(s)
+            for s in self.sessions.values()
+            if (not origins or s["origin"] == origins) and (not tags or tags & set(s["tags"]))
+        ]
 
     def list_automations(self) -> list[JSON]:
         return [dict(a) for a in self.automations.values()]
@@ -93,9 +98,6 @@ class FakeDevin:
 
     def org_consumption(self, time_after: int, time_before: int) -> JSON:
         return {"total_acus": round(sum(self.consumption.values()), 3), "consumption_by_date": []}
-
-    def sessions_insights(self, **params: Any) -> list[JSON]:
-        return [{"session_id": s["session_id"], "status": s["status"]} for s in self.sessions.values()]
 
     def session_consumption(self, session_id: str) -> JSON:
         return {"session_id": session_id, "total_acus": self.consumption.get(session_id, 0.0)}
@@ -260,9 +262,6 @@ class FakeGitHub:
         return merged_in_order(
             [dict(p) for p in self.pulls.values() if (p.get("base") or {}).get("ref") == base_branch]
         )
-
-    def get_branch_sha(self, repo: str, branch: str) -> str:
-        return self.branch_heads[branch]
 
     def get_commit_parents(self, repo: str, sha: str) -> list[str]:
         return list(self.parents.get(sha, []))
