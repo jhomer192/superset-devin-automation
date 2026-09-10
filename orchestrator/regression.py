@@ -48,8 +48,8 @@ class Failure:
     probe: str
     issue: int | None
     head_exit_code: int | None
-    base_exit_code: int | None
     evidence: str
+    requirements: tuple[str, ...] = ()
 
 
 def failures(output: dict[str, Any]) -> list[Failure]:
@@ -60,8 +60,8 @@ def failures(output: dict[str, Any]) -> list[Failure]:
             probe=str(r.get("probe")),
             issue=r.get("issue"),
             head_exit_code=r.get("head_exit_code"),
-            base_exit_code=r.get("base_exit_code"),
             evidence=str(r.get("evidence") or ""),
+            requirements=tuple(str(x) for x in r.get("requirements") or []),
         )
         for r in results
         if not r.get("acceptance_met")
@@ -74,7 +74,6 @@ def failures(output: dict[str, Any]) -> list[Failure]:
             probe=str(output.get("probe_command") or "verify/run_all.sh"),
             issue=None,
             head_exit_code=output.get("probe_exit_code"),
-            base_exit_code=None,
             evidence=str(output.get("evidence") or ""),
         )
     ]
@@ -83,7 +82,10 @@ def failures(output: dict[str, Any]) -> list[Failure]:
 def issue_title(pr_number: int, items: list[Failure]) -> str:
     first = items[0].probe.split()[0]
     more = f" (+{len(items) - 1} more)" if len(items) > 1 else ""
-    return f"Regression on merged PR #{pr_number}: probe {first} fails at HEAD{more}"
+    reqs = sorted({r for f in items for r in f.requirements})
+    if reqs:
+        return f"PRD violated after PR #{pr_number}: {', '.join(reqs)} ({first}{more})"
+    return f"PRD verification failed after PR #{pr_number}: {first}{more}"
 
 
 def issue_body(
@@ -93,14 +95,11 @@ def issue_body(
     pr_url: str,
     window_prs: list[int],
     head_sha: str,
-    base_sha: str | None,
     items: list[Failure],
     session_url: str,
 ) -> str:
     rows = "\n".join(
-        f"| {f.probe} | {f.issue or '-'} | {f.base_exit_code if f.base_exit_code is not None else '-'} "
-        f"| {f.head_exit_code} |"
-        for f in items
+        f"| {f.probe} | {', '.join(f.requirements) or '-'} | {f.head_exit_code} |" for f in items
     )
     evidence = "\n\n".join(
         f"<details><summary>{f.probe}</summary>\n\n```\n{f.evidence[-4000:]}\n```\n</details>"
@@ -108,20 +107,18 @@ def issue_body(
         if f.evidence
     )
     window = "\n".join(f"- https://github.com/{target_repo}/pull/{n}" for n in window_prs)
-    return f"""Filed automatically by the regression verification triggered by {pr_url}.
+    return f"""Filed automatically by the PRD verification triggered by {pr_url}.
 
-The merged commit `{head_sha}` fails a probe that must pass. Verification session: {session_url}
+The merged commit `{head_sha}` fails a probe of a PRD.md requirement. Verification session: {session_url}
 
-| probe | guards issue | exit at BASE | exit at HEAD |
-|-------|--------------|--------------|--------------|
+| probe | PRD requirement | exit code |
+|-------|-----------------|-----------|
 {rows}
-
-BASE commit: `{base_sha or "unknown"}`
 
 ## Verification window
 
-Every merge between BASE and HEAD is a candidate cause; the triggering PR is only the one that
-hit the cadence:
+Every merge in the window is a candidate cause; the triggering PR is only the one that hit the
+cadence:
 
 {window}
 
@@ -168,13 +165,12 @@ def file_regression_issue(
     pr_url: str,
     window_prs: list[int],
     head_sha: str,
-    base_sha: str | None,
     depth: int = 0,
 ) -> dict[str, Any]:
     """Open one regression issue for a failed verification and record what the fix must satisfy.
 
     `pr_number` is the merge that triggered the verification; `window_prs` is every merge it
-    covered, `head_sha`/`base_sha` the range it ran against.
+    covered, `head_sha` the commit it ran against.
     """
     output = session.get("structured_output") or {}
     items = failures(output)
@@ -188,7 +184,6 @@ def file_regression_issue(
             pr_url=pr_url,
             window_prs=window_prs,
             head_sha=head_sha,
-            base_sha=base_sha,
             items=items,
             session_url=session_url,
         ),
@@ -239,6 +234,8 @@ def start_regression_fix(
     automation_repo: str,
     issue: dict[str, Any],
     record: LedgerEntry,
+    trigger: str,
+    playbook_id: str | None = None,
 ) -> dict[str, Any]:
     """Start the one fix session for a regression issue, from what TESTING recorded on it."""
     number = int(issue["number"])
@@ -256,6 +253,7 @@ def start_regression_fix(
                 pr_url=pr_url,
                 head_sha=head_sha,
                 probes=probes,
+                playbook_id=playbook_id,
             ),
             "title": f"Fix regression {target_repo}#{number} from {pr_url}",
             "tags": [FIX_TAG, REGRESSION_TAG, f"issue-{number}"],
@@ -276,7 +274,7 @@ def start_regression_fix(
                 "regression_of": pr_url,
                 "window": list(record.data.get("window") or []),
                 "depth": record.data.get("depth", 0),
-                "trigger": "github:issues",
+                "trigger": trigger,
             },
         ),
         [
@@ -284,5 +282,5 @@ def start_regression_fix(
             f"deciding probes: {', '.join(probes)}",
         ],
     )
-    log.info("AUTOPR: regression #%d -> session %s", number, fix_id)
+    log.info("%s: regression #%d -> session %s", trigger, number, fix_id)
     return {"issue": number, "session_id": fix_id, "probes": probes}

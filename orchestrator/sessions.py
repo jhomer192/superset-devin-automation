@@ -78,7 +78,7 @@ def wait_until_finished(
     devin: DevinClient, session_id: str, sleep: Callable[[float], None] = time.sleep
 ) -> dict[str, Any]:
     """Poll until the session has written its structured output or is finished. No deadline: a
-    verification takes as long as building and booting Superset twice takes, and a session that is
+    verification takes as long as building and booting Superset takes, and a session that is
     waiting on a human without a result holds the slot until that human acts."""
     while True:
         session = devin.get_session(session_id)

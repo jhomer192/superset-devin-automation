@@ -169,6 +169,7 @@ def fix_recent_regressions(
     sleep: Callable[[float], None],
     now: datetime | None = None,
     include: Iterable[int] = (),
+    playbook_id: str | None = None,
 ) -> tuple[list[int], AutoprReport]:
     report = AutoprReport(trigger="find-and-fix")
     ledger = IssueLedger(gh, target_repo)
@@ -204,6 +205,8 @@ def fix_recent_regressions(
             automation_repo=automation_repo,
             issue=issue,
             record=record,
+            trigger=report.trigger,
+            playbook_id=playbook_id,
         )
         report.started.append(started)
         started_now = Coverage(number, f"fix session {started['session_id']} started this run")
@@ -226,6 +229,7 @@ def run_find_and_fix(
     every_n: int,
     issue_window_hours: int = DEFAULT_ISSUE_WINDOW_HOURS,
     playbook_id: str | None = None,
+    fix_playbook_id: str | None = None,
     wait: bool = True,
     sleep: Callable[[float], None] = time.sleep,
     now: datetime | None = None,
@@ -258,6 +262,7 @@ def run_find_and_fix(
         sleep=sleep,
         now=now,
         include=[int(filed["issue"])] if filed.get("issue") else (),
+        playbook_id=fix_playbook_id,
     )
     report.fixes = fixes.as_dict()
     # keyed by the verification alone: a replayed find-and-fix for the same merge reports nothing twice

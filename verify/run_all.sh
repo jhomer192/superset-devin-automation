@@ -1,19 +1,17 @@
 #!/usr/bin/env bash
-# Full regression verification, meant to run on a Devin VM (or any Linux box with docker,
-# node >= 20 and python >= 3.11).
+# PRD verification, meant to run on a Devin VM (or any Linux box with docker, node >= 20 and
+# python >= 3.11).
 #
-#   verify/run_all.sh --head <sha> --base <sha> --issues 5,7 [--regression 1,3] [--repo jhomer192/superset]
+#   verify/run_all.sh --head <sha> --requirements PRD-SEC-1,PRD-OPS-1 [--repo jhomer192/superset]
 #
 # Steps, in order (each is a stage; the JSON result records which stage failed):
-#   1. clone the target repo twice: HEAD (merged commit) and BASE (its first parent)
+#   1. clone the target repo at HEAD (the merged commit)
 #   2. start a real PostgreSQL (docker) + Redis for the integration lane
-#   3. install backend requirements for HEAD into a venv; npm ci && npm run build the frontend
-#   4. per checkout: db upgrade / init / create admin on its own database, boot gunicorn
-#      (HEAD on :8088, BASE on :8089), wait for /health, run every probe against THAT app
-#   5. probes for --issues must pass at HEAD and fail at BASE
-#      run every probe for --regression at HEAD (must pass); BASE result recorded only
+#   3. install backend requirements into a venv; npm ci && npm run build the frontend
+#   4. db upgrade / init / create admin, boot gunicorn on :8088, wait for /health
+#   5. run every probe of the PRD requirements in --requirements against that app
 #   6. write verify/out/result.json matching orchestrator.schema.VERIFICATION_SCHEMA and exit
-#      0 iff every acceptance condition held.
+#      0 iff every probe exited 0.
 #
 # Probes never see agent judgement: verify/collect.py turns exit codes into the verdict.
 set -uo pipefail
@@ -21,7 +19,7 @@ set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "${here}/.." && pwd)"
 REPO="jhomer192/superset"
-HEAD_SHA=""; BASE_SHA=""; ISSUES=""; REGRESSION=""
+HEAD_SHA=""; REQUIREMENTS=""
 WORK="${SDA_WORKDIR:-${root}/verify/work}"
 OUT="${root}/verify/out"
 PG_PORT="${SDA_PG_PORT:-55432}"
@@ -31,14 +29,13 @@ SUPERSET_PORT="${SDA_SUPERSET_PORT:-8088}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --head) HEAD_SHA="$2"; shift 2 ;;
-    --base) BASE_SHA="$2"; shift 2 ;;
-    --issues) ISSUES="$2"; shift 2 ;;
-    --regression) REGRESSION="$2"; shift 2 ;;
+    --requirements) REQUIREMENTS="$2"; shift 2 ;;
     --repo) REPO="$2"; shift 2 ;;
     *) echo "unknown arg $1" >&2; exit 2 ;;
   esac
 done
 [[ -n "${HEAD_SHA}" ]] || { echo "--head required" >&2; exit 2; }
+[[ -n "${REQUIREMENTS}" ]] || { echo "--requirements required" >&2; exit 2; }
 
 mkdir -p "${WORK}" "${OUT}"
 STAGE_LOG="${OUT}/stages.log"
@@ -47,7 +44,7 @@ stage() { echo "[$(date -u +%H:%M:%S)] STAGE $1" | tee -a "${STAGE_LOG}" >&2; }
 fail_stage() {
   local stage="$1" msg="$2"
   python3 "${here}/collect.py" --error --stage "${stage}" --message "${msg}" \
-    --head "${HEAD_SHA}" --base "${BASE_SHA}" --out "${OUT}/result.json"
+    --head "${HEAD_SHA}" --out "${OUT}/result.json"
   exit 1
 }
 
@@ -57,22 +54,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# ---- 1. clones ------------------------------------------------------------------------------
+# ---- 1. clone ------------------------------------------------------------------------------
 stage clone
-HEAD_DIR="${WORK}/head"; BASE_DIR="${WORK}/base"
-clone_at() {
-  local dir="$1" sha="$2"
-  if [[ ! -d "${dir}/.git" ]]; then
-    git clone --quiet "https://github.com/${REPO}.git" "${dir}" || return 1
-  fi
-  git -C "${dir}" fetch --quiet origin "${sha}" || true
-  git -C "${dir}" checkout --quiet --force "${sha}"
-}
-clone_at "${HEAD_DIR}" "${HEAD_SHA}" || fail_stage clone "could not clone ${REPO}@${HEAD_SHA}"
-if [[ -z "${BASE_SHA}" ]]; then
-  BASE_SHA="$(git -C "${HEAD_DIR}" rev-parse "${HEAD_SHA}^1")" || fail_stage clone "no first parent for ${HEAD_SHA}"
+HEAD_DIR="${WORK}/head"
+if [[ ! -d "${HEAD_DIR}/.git" ]]; then
+  git clone --quiet "https://github.com/${REPO}.git" "${HEAD_DIR}" || fail_stage clone "could not clone ${REPO}"
 fi
-clone_at "${BASE_DIR}" "${BASE_SHA}" || fail_stage clone "could not check out base ${BASE_SHA}"
+git -C "${HEAD_DIR}" fetch --quiet origin "${HEAD_SHA}" || true
+git -C "${HEAD_DIR}" checkout --quiet --force "${HEAD_SHA}" || fail_stage clone "could not check out ${REPO}@${HEAD_SHA}"
 
 # ---- 2. services ------------------------------------------------------------------------------
 stage services
@@ -108,7 +97,7 @@ stage frontend_build
   npm ci --no-audit --no-fund && npm run build
 ) >"${OUT}/frontend_build.log" 2>&1 || fail_stage frontend_build "npm ci / npm run build failed at ${HEAD_SHA} (see verify/out/frontend_build.log)"
 
-# ---- 4 + 5. boot each checkout on its own DB and port, probe that role against that app -------------
+# ---- 4. boot -----------------------------------------------------------------------------------
 stage boot
 cat >"${WORK}/superset_config.py" <<EOF
 import os
@@ -122,68 +111,47 @@ export SUPERSET_CONFIG_PATH="${WORK}/superset_config.py"
 export SUPERSET_ADMIN_USER=admin SUPERSET_ADMIN_PASSWORD=admin
 PROBE_RESULTS="${OUT}/probes.jsonl"; : >"${PROBE_RESULTS}"
 PROBE_LIST="${OUT}/probes.tsv"
-python3 "${here}/list_probes.py" --issues "${ISSUES}" --regression "${REGRESSION}" >"${PROBE_LIST}"
+python3 "${here}/list_probes.py" --requirements "${REQUIREMENTS}" >"${PROBE_LIST}"
 
-boot_app() {  # <checkout> <role> <port> -- own database per role; sets SUPERSET_URL and GUNICORN_PID
-  local src="$1" role="$2" port="$3"
-  local db="superset_${role}"
-  docker exec sda-postgres psql -U superset -d superset -qc "CREATE DATABASE ${db}" >/dev/null 2>&1 || true
-  export SUPERSET__SQLALCHEMY_DATABASE_URI="postgresql+psycopg2://superset:superset@127.0.0.1:${PG_PORT}/${db}"
-  (
-    cd "${src}"
-    export PYTHONPATH="${src}${PYTHONPATH:+:${PYTHONPATH}}"
-    "${VENV}/bin/superset" db upgrade
-    "${VENV}/bin/superset" fab create-admin --username admin --firstname a --lastname a \
-      --email admin@example.com --password admin
-    "${VENV}/bin/superset" init
-  ) >"${OUT}/boot-${role}.log" 2>&1 || fail_stage boot "superset db upgrade/init failed at ${role} (see verify/out/boot-${role}.log)"
-  (
-    cd "${src}"
-    PYTHONPATH="${src}${PYTHONPATH:+:${PYTHONPATH}}" "${VENV}/bin/gunicorn" -w 2 -b "127.0.0.1:${port}" \
-      "superset.app:create_app()" >>"${OUT}/boot-${role}.log" 2>&1 &
-    echo $! >"${WORK}/gunicorn-${role}.pid"
-  )
-  GUNICORN_PID="$(cat "${WORK}/gunicorn-${role}.pid")"
-  export SUPERSET_URL="http://127.0.0.1:${port}"
-  for _ in $(seq 1 120); do
-    curl -fsS "${SUPERSET_URL}/health" >/dev/null 2>&1 && break
-    sleep 2
-  done
-  curl -fsS "${SUPERSET_URL}/health" >/dev/null 2>&1 || fail_stage boot "Superset at ${role} never answered /health"
-}
+(
+  cd "${HEAD_DIR}"
+  export PYTHONPATH="${HEAD_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
+  "${VENV}/bin/superset" db upgrade
+  "${VENV}/bin/superset" fab create-admin --username admin --firstname a --lastname a \
+    --email admin@example.com --password admin
+  "${VENV}/bin/superset" init
+) >"${OUT}/boot.log" 2>&1 || fail_stage boot "superset db upgrade/init failed (see verify/out/boot.log)"
+(
+  cd "${HEAD_DIR}"
+  PYTHONPATH="${HEAD_DIR}${PYTHONPATH:+:${PYTHONPATH}}" "${VENV}/bin/gunicorn" -w 2 -b "127.0.0.1:${SUPERSET_PORT}" \
+    "superset.app:create_app()" >>"${OUT}/boot.log" 2>&1 &
+  echo $! >"${WORK}/gunicorn.pid"
+)
+GUNICORN_PID="$(cat "${WORK}/gunicorn.pid")"
+export SUPERSET_URL="http://127.0.0.1:${SUPERSET_PORT}"
+for _ in $(seq 1 120); do
+  curl -fsS "${SUPERSET_URL}/health" >/dev/null 2>&1 && break
+  sleep 2
+done
+curl -fsS "${SUPERSET_URL}/health" >/dev/null 2>&1 || fail_stage boot "Superset never answered /health"
 
-run_probe() {  # <issue> <probe_id> <kind> <script> <checkout> <role>
-  local issue="$1" id="$2" kind="$3" script="$4" src="$5" role="$6"
-  local log
-  log="${OUT}/$(echo "${id}" | tr '/' '_')-${role}.log"
-  SUPERSET_SRC="${src}" bash "${root}/${script}" >"${log}" 2>&1
-  local code=$?
-  python3 - "$PROBE_RESULTS" "$issue" "$id" "$kind" "$role" "$code" "$log" <<'PY'
+# ---- 5. probes ---------------------------------------------------------------------------------
+stage probes
+while IFS=$'\t' read -r issue pid kind script; do
+  log="${OUT}/$(echo "${pid}" | tr '/' '_').log"
+  SUPERSET_SRC="${HEAD_DIR}" bash "${root}/${script}" >"${log}" 2>&1
+  code=$?
+  python3 - "$PROBE_RESULTS" "$issue" "$pid" "$kind" "$code" "$log" <<'PY'
 import json, sys
-path, issue, pid, kind, role, code, log = sys.argv[1:]
+path, issue, pid, kind, code, log = sys.argv[1:]
 with open(path, "a") as f:
-    f.write(json.dumps({"issue": int(issue), "probe": pid, "kind": kind, "role": role,
+    f.write(json.dumps({"issue": int(issue), "probe": pid, "kind": kind,
                         "exit_code": int(code), "log": log}) + "\n")
 PY
-  echo "  ${role}/${id} -> exit ${code}" >&2
-}
-
-probe_checkout() {  # <checkout> <role> <port>
-  boot_app "$@"
-  stage probes
-  while IFS=$'\t' read -r issue pid kind script; do
-    run_probe "${issue}" "${pid}" "${kind}" "${script}" "$1" "$2"
-  done <"${PROBE_LIST}"
-  kill "${GUNICORN_PID}" 2>/dev/null || true
-  wait "${GUNICORN_PID}" 2>/dev/null || true
-}
-
-probe_checkout "${HEAD_DIR}" head "${SUPERSET_PORT}"
-HEAD_URL="${SUPERSET_URL}"
-probe_checkout "${BASE_DIR}" base "$((SUPERSET_PORT + 1))"
-SUPERSET_URL="${HEAD_URL}"
+  echo "  ${pid} -> exit ${code}" >&2
+done <"${PROBE_LIST}"
 
 # ---- 6. verdict -------------------------------------------------------------------------
 stage verdict
-python3 "${here}/collect.py" --probes "${PROBE_RESULTS}" --issues "${ISSUES}" --regression "${REGRESSION}" \
-  --head "${HEAD_SHA}" --base "${BASE_SHA}" --health-url "${SUPERSET_URL}/health" --out "${OUT}/result.json"
+python3 "${here}/collect.py" --probes "${PROBE_RESULTS}" --requirements "${REQUIREMENTS}" \
+  --head "${HEAD_SHA}" --health-url "${SUPERSET_URL}/health" --out "${OUT}/result.json"

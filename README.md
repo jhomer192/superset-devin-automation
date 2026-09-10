@@ -12,7 +12,7 @@ covered by `tests/`.
 ```
 PR merges into master ──► find-and-fix (one invocation, one daemon-style pass)
    1. TESTING: every merge (VERIFY_EVERY_N_MERGES=1; set 5 for every 5th), one verification session on a Devin VM
-      (clone Superset at HEAD and BASE, Postgres + Redis, build, boot, probes),
+      (clone Superset at HEAD, Postgres + Redis, build, boot, probes),
       wait for the verdict, comment it on every PR of the window
    2. acceptance_met == false ──► regression issues labelled `sda-regression`
    3. every open `sda-regression` issue opened in the last REGRESSION_ISSUE_WINDOW_HOURS
@@ -46,11 +46,11 @@ prompt that is the same on every run:
 | Playbook | Body (`orchestrator/prompts.py`) | Attached schema | Used by |
 |----------|----------------------------------|-----------------|---------|
 | `superset-devin-automation: remediation` | `FIX_PLAYBOOK_BODY`: clone at master, branch, venv from `requirements/development.txt`, run every deciding probe and require non-zero at base, minimal fix following the fork's `AGENTS.md`, re-run probes and require 0, PR body with `Closes #NN`, Conventional Commits title, no AI attribution | `FIX_SCHEMA` | fix sessions started by AUTOPR's Friday sweep |
-| `superset-devin-automation: verification` | `VERIFY_PLAYBOOK_BODY`: clone this repo, run `verify/run_all.sh` with the given repo/head/base/issues, copy the resulting verify/out/result.json into the structured output verbatim, never modify `probes/` or `verify/`, no PR | `VERIFICATION_SCHEMA` | verification sessions started by TESTING |
+| `superset-devin-automation: verification` | `VERIFY_PLAYBOOK_BODY`: clone this repo, run `verify/run_all.sh` with the given repo/head/requirements, copy the resulting verify/out/result.json into the structured output verbatim, never modify `probes/` or `verify/`, no PR | `VERIFICATION_SCHEMA` | verification sessions started by TESTING |
 
 The per-session prompt is then only the variables: the `@owner/repo` token, the
 `@playbook:{id}` token, and the issue number/title/condition/URL and probe list (fix) or the
-HEAD/BASE SHAs, PR URL, issue numbers and probe list (verification). `playbook_id` on a
+HEAD SHA, PR URL, PRD requirement ids and probe list (verification). `playbook_id` on a
 session is read-only; the API derives it from the token, exactly as `repos` is derived from
 `@owner/repo`. If `PLAYBOOK_ID_FIX` or `PLAYBOOK_ID_VERIFY` is unset, the same body is inlined
 into the prompt and a warning is logged; a missing playbook never stops TESTING or AUTOPR.
@@ -165,10 +165,10 @@ Progress is an append-only comment log on the issue (`orchestrator/ledger.py`,
 ## How a merged PR is verified (TESTING)
 
 `orchestrator/testing_job.py` accepts only `closed` + `merged` events for the target repo
-whose `pull_request.base.ref` is `VERIFY_BRANCH`, resolves the issues the merged PRs close
-(`Closes #n` keywords) plus every issue whose fix already landed (regression guards), and starts
-one session keyed `(pr_url, merge_commit_sha)`. The ledger comment on the PR makes a replayed
-webhook a no-op.
+whose `pull_request.base.ref` is `VERIFY_BRANCH`, selects the probe of every requirement in
+`PRD.md` (`probes/registry.json`, `prd.requirements`), and starts one session keyed
+`(pr_url, merge_commit_sha)`. Closed issues and `Closes #n` keywords play no part in selection.
+The ledger comment on the PR makes a replayed webhook a no-op.
 
 ### Cadence: every *n*th merge into a selected branch
 
@@ -184,32 +184,40 @@ VERIFY_EVERY_N_MERGES=5       # verify when count % n == 0 (default: 5)
 On each event, `run_testing` lists the PRs merged into `VERIFY_BRANCH` (`GET /pulls?state=closed&base=…`,
 ordered by `merged_at`) and takes this PR's 1-based position *k*. If `k % n != 0` it appends a
 `merge_counted` ledger comment ("merge k, verification deferred") to the PR and exits without a
-session. If `k % n == 0` it verifies the window of the last *n* merges: HEAD is this PR's
-`merge_commit_sha`, BASE is the first parent of the oldest merge in the window, and the probes
-cover every issue closed anywhere in the window. A replayed webhook finds the `merge_counted` or
+session. If `k % n == 0` it verifies HEAD = this PR's `merge_commit_sha`; the window of the
+last *n* merges is recorded so a failure names every PR that could have caused it. A replayed webhook finds the `merge_counted` or
 `verification_started` record and does nothing; PRs merged into other branches are skipped
 before counting. `register` bakes both values into the TESTING prompt and metadata, so changing
 them is `VERIFY_BRANCH=… VERIFY_EVERY_N_MERGES=… orchestrator register`.
 
 The session runs `verify/run_all.sh`, which on the Devin VM:
 
-1. clones the target repo at HEAD and at BASE;
+1. clones the target repo at HEAD;
 2. starts PostgreSQL 16 and Redis in docker;
 3. installs backend requirements into a venv, `npm ci && npm run build` in `superset-frontend`;
 4. `superset db upgrade`, creates an admin, `superset init`, boots gunicorn, waits for `/health`;
-5. runs every selected probe at HEAD and at BASE (`verify/list_probes.py` picks them from the
-   registry);
+5. runs every PRD requirement's probe against that app (`verify/list_probes.py` picks them
+   from the registry);
 6. `verify/collect.py` turns exit codes into verify/out/result.json (git-ignored), valid against
    `VERIFICATION_SCHEMA`, and exits 0 iff acceptance held.
 
-Acceptance is mechanical: a probe for an issue the PR closes must **pass at HEAD and fail at
-BASE**; one that already passes at BASE fails the run (`verification_prompt` states why). A
-probe for an already-landed fix (regression guard) must pass at HEAD.
+Acceptance is mechanical: every selected probe must exit 0 at HEAD. There is no BASE checkout
+and no comparison with the state before the merge.
+
+### The spec: PRD.md
+
+The target repo carries `PRD.md`, a product requirements document with stable ids
+(`PRD-SEC-1`, `PRD-AUTH-1`, ...). The `prd.requirements` block of `probes/registry.json` maps
+each id to the probes that hold it, either an issue's probe or a standalone one under
+`probes/prd/` (listed in the registry's top-level `probes`). Every verification passes all
+requirement ids as `--requirements`; each of their probes must pass at HEAD, and a failure files
+a regression issue whose title and table name the violated requirement. Adding coverage means
+adding a requirement to `PRD.md` and a probe for it to the registry.
 
 With `--wait` (the registered shim always passes it) the command then polls
 `GET /sessions/{id}` every 60 s until the verification reaches a terminal state, with no
 deadline, and publishes through `orchestrator/publish.py`: a `session_reported` comment with the
-verdict, per-probe BASE/HEAD exit codes, ACUs and session URL on every PR of the window, and on
+verdict, per-probe HEAD exit codes, ACUs and session URL on every PR of the window, and on
 `acceptance_met == false` the regression issue (see Self-healing). Every comment is keyed by
 session id in its marker, so a replayed event posts nothing twice.
 
@@ -257,12 +265,12 @@ engineering leader reads the PR or issue and sees what happened to it:
 
 | stage | where | ledger entries (`<!-- sda:{json} -->`) and what they answer |
 |-------|-------|-------------------------------------------------------------|
-| TESTING | every PR merged into `VERIFY_BRANCH` | `merge_counted` (position k of n: did the merge count?); `verification_started` (session id, HEAD, BASE, window: what is being verified?); `session_reported` (verdict, per-probe BASE/HEAD exit codes, ACUs, session URL: did it pass, what did it cost?); `regression_filed` / `regression_escalated` (issue number, depth: what happened to a failure?) |
+| TESTING | every PR merged into `VERIFY_BRANCH` | `merge_counted` (position k of n: did the merge count?); `verification_started` (session id, HEAD, requirements, window: what is being verified?); `session_reported` (verdict, per-probe HEAD exit codes, ACUs, session URL: did it pass, what did it cost?); `regression_filed` / `regression_escalated` (issue number, depth: what happened to a failure?) |
 | AUTOPR | the regression issue / each `ready` issue | `regression_depth` (chain depth, PR, window, probes: why does this issue exist?); `session_started` with `trigger: github:issues` or `sweep` (which session, started by what?); `session_reported` (verdict, PR URL, ACUs, session URL: did the fix land, what did it cost?); `triage_deflected` (why nothing started) |
 
 The last step of a run that waited for sessions is the report (`orchestrator/status.py`): one
 comment on the `sda-status` issue in the target repository, created on first use. A TESTING
-comment carries merge position, window, BASE/HEAD, verdict, per-probe exit codes, ACUs and the
+comment carries merge position, window, HEAD, verdict, per-probe exit codes, ACUs and the
 regression issue if one was filed; an AUTOPR comment carries the trigger and, per fix session,
 issue, verdict, session, PR URL and ACUs, then the run's total. Reading that issue top to bottom
 is the run log of the loop, and a replayed run appends nothing (`run_reported` marker).
@@ -289,8 +297,8 @@ A verification whose structured output says `acceptance_met == false` has found 
 fails on a commit already on `master`. TESTING files that verdict as work
 (`file_regression_issue` in `orchestrator/regression.py`): one issue on the target repo labelled
 `sda-regression`/`regression` naming the PR whose merge triggered the verification, listing every
-PR in the verified window (any of them could be the cause), the HEAD and BASE SHAs, the probe
-table with both exit codes and the captured evidence, plus a `regression_depth` ledger entry with
+PR in the verified window (any of them could be the cause), the HEAD SHA, the probe
+table with requirement ids and exit codes and the captured evidence, plus a `regression_depth` ledger entry with
 the PR, window and probes. If an open `sda-regression` issue's `regression_depth` record already
 names exactly the same probe set, the run adopts that issue (a `regression_filed` entry with
 `adopted: true` on the PR and a comment on the issue) instead of filing another; a different or
@@ -327,7 +335,7 @@ CI (`.github/workflows/ci.yml`) runs the same plus `docker compose build` and a 
 * **Cadence.** Nothing runs on a clock. Verification runs on every merge into `VERIFY_BRANCH`
   by default, or every *n*th with `VERIFY_EVERY_N_MERGES=n`. The counter is not held by the automation — it cannot be, there is
   no callback action — but computed from the branch's merged-PR history on each event.
-* **Regression guards.** TESTING runs the probes for already-landed fixes too, not only the PR's
-  own issue — that is what "no regressions since last time" actually requires.
+* **Spec.** `PRD.md` is the only thing verified. `ISSUES.md` documents the probes and the issues
+  they came from; an issue's probe runs only if a PRD requirement maps to it.
 * **Issue #15** duplicates #12 (same lockfile defect, closed by PR 17). Both are deflected by
   the AUTOPR sweep; the registry maps #15 to the same probe so the merge of PR 17 is verified.

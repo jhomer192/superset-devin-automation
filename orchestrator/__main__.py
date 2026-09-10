@@ -118,6 +118,7 @@ def cmd_find_and_fix(
         every_n=settings.verify_every_n_merges,
         issue_window_hours=settings.regression_issue_window_hours,
         playbook_id=settings.playbook_id_verify,
+        fix_playbook_id=settings.playbook_id_fix,
         **kwargs,
     ).as_dict()
 
