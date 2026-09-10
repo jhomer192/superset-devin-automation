@@ -1,11 +1,11 @@
-"""CYCLE: the whole loop in one invocation, run to completion.
+"""find-and-fix: the whole loop in one invocation, run to completion.
 
     verify the merge window (TESTING)            -> regression issues, labelled
     every `sda-regression` issue opened in the
     last N hours without a fix in flight         -> one fix session each
-    wait for all of them (none is fine)          -> one cycle report on the status issue
+    wait for all of them (none is fine)          -> one find-and-fix report on the status issue
 
-TESTING and AUTOPR still write their own stage telemetry; the cycle report is the rollup a
+TESTING and AUTOPR still write their own stage telemetry; the find-and-fix report is the rollup a
 leader reads: what was verified, what regressed, what got fixed, what it cost.
 """
 
@@ -33,7 +33,7 @@ DEFAULT_ISSUE_WINDOW_HOURS = 24
 
 
 @dataclass
-class CycleReport:
+class FinderReport:
     testing: dict[str, Any] = field(default_factory=dict)
     issue_window_hours: int = DEFAULT_ISSUE_WINDOW_HOURS
     candidates: list[int] = field(default_factory=list)
@@ -72,7 +72,7 @@ def fix_recent_regressions(
     sleep: Callable[[float], None],
     now: datetime | None = None,
 ) -> tuple[list[int], AutoprReport]:
-    report = AutoprReport(trigger="cycle")
+    report = AutoprReport(trigger="find-and-fix")
     ledger = IssueLedger(gh, target_repo)
     issues = recent_regression_issues(gh, target_repo, hours, now)
     report.scanned = len(issues)
@@ -89,7 +89,7 @@ def fix_recent_regressions(
         reason = _in_flight_reason(number, entries, open_prs, devin, target_repo)
         if reason:
             report.skipped_in_flight.append({"issue": number, "reason": reason})
-            log.info("CYCLE: #%d skipped, %s", number, reason)
+            log.info("find-and-fix: #%d skipped, %s", number, reason)
             continue
         report.started.append(
             start_regression_fix(
@@ -106,7 +106,7 @@ def fix_recent_regressions(
     return [int(i["number"]) for i in issues], report
 
 
-def run_cycle(
+def run_find_and_fix(
     *,
     devin: DevinClient,
     gh: GitHubClient,
@@ -121,8 +121,8 @@ def run_cycle(
     wait: bool = True,
     sleep: Callable[[float], None] = time.sleep,
     now: datetime | None = None,
-) -> CycleReport:
-    report = CycleReport(issue_window_hours=issue_window_hours)
+) -> FinderReport:
+    report = FinderReport(issue_window_hours=issue_window_hours)
     testing: TestingReport = run_testing(
         devin=devin,
         gh=gh,
@@ -150,7 +150,7 @@ def run_cycle(
         now=now,
     )
     report.fixes = fixes.as_dict()
-    # keyed by the verification alone: a replayed cycle for the same merge reports nothing twice
+    # keyed by the verification alone: a replayed find-and-fix for the same merge reports nothing twice
     session_ids = [testing.session_id] if testing.session_id else []
     verdict = testing.verdict or testing.skipped_reason or "no verification this merge"
     filed = testing.regression_filed or {}
@@ -161,14 +161,14 @@ def run_cycle(
         f"regression issue filed: {filed.get('issue_url') or 'none'}",
         f"regression issues opened in the last {issue_window_hours}h: "
         + (", ".join(f"#{n}" for n in report.candidates) or "none"),
-        *autopr_lines("cycle", fixes.finished, 0, len(fixes.skipped_in_flight)),
+        *autopr_lines("find-and-fix", fixes.finished, 0, len(fixes.skipped_in_flight)),
     ]
     report.status_issue = post_run(
         gh,
         target_repo,
-        "cycle",
+        "find-and-fix",
         session_ids,
-        f"CYCLE: {verdict}; {len(fixes.finished)} fix session(s)",
+        f"find-and-fix: {verdict}; {len(fixes.finished)} fix session(s)",
         {
             "verdict": testing.verdict,
             "window": list(testing.window_prs),

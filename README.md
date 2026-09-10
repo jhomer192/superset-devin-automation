@@ -10,27 +10,30 @@ merged PR gets verified, whether the fix worked — is made by code in this repo
 covered by `tests/`.
 
 ```
-PR merges into master ──► CYCLE (one invocation, one daemon-style pass)
-   1. TESTING: every 5th merge, one verification session on a Devin VM
+PR merges into master ──► find-and-fix (one invocation, one daemon-style pass)
+   1. TESTING: every merge (VERIFY_EVERY_N_MERGES=1; set 5 for every 5th), one verification session on a Devin VM
       (clone Superset at HEAD and BASE, Postgres + Redis, build, boot, probes),
       wait for the verdict, comment it on every PR of the window
    2. acceptance_met == false ──► regression issues labelled `sda-regression`
-   3. every open `sda-regression` issue opened in the last CYCLE_ISSUE_WINDOW_HOURS
+   3. every open `sda-regression` issue opened in the last REGRESSION_ISSUE_WINDOW_HOURS
       (default 24) that has no fix in flight ──► one fix session each, on its own VM
    4. wait for all of them (zero is fine) ──► verdict, PR and ACUs on each issue
-   5. one CYCLE report on the `sda-status` issue ──► fix PRs merge ──► back to 1
+   5. one find-and-fix report on the `sda-status` issue ──► fix PRs merge ──► back to 1
 ```
 
 | Name | Trigger | What the orchestrator does |
 |------|---------|----------------------------|
-| **CYCLE** — `superset-devin-automation: CYCLE (verify every 5th merge, fix regressions, report)` | `github:pull_request` with `action == "closed"`, `pull_request.merged == true`, `repository.full_name == "jhomer192/superset"` | `python -m orchestrator cycle --event-json <path>`: steps 1–5 above (`orchestrator/cycle.py`, wrapping `testing_job.run_testing`, `regression.start_regression_fix` and `autopr_job.publish_fixes`). Issues without TESTING's `regression_depth` record, issues an open PR already closes, and issues whose fix session is still running are skipped and listed in the report. |
-| **AUTOPR** — `superset-devin-automation: AUTOPR (Friday ready-issue sweep)` | `schedule:recurring` `FREQ=WEEKLY;BYDAY=FR` | `python -m orchestrator autopr --wait --event-json <path>`: triage every open `ready` issue, start at most one fix session per eligible issue, wait for all of them and post each verdict, PR and ACUs on its issue. |
+| **find-and-fix** — `superset issue finder and fixer` | `github:pull_request` with `action == "closed"`, `pull_request.merged == true`, `repository.full_name == "jhomer192/superset"` | `python -m orchestrator find-and-fix --event-json <path>`: steps 1–5 above (`orchestrator/find_and_fix.py`, wrapping `testing_job.run_testing`, `regression.start_regression_fix` and `autopr_job.publish_fixes`). Issues without TESTING's `regression_depth` record, issues an open PR already closes, and issues whose fix session is still running are skipped and listed in the report. |
+
+find-and-fix is the only automation; there is no schedule. `python -m orchestrator autopr --wait` (triage every open
+`ready` issue, one fix session each, wait, post each verdict/PR/ACUs) remains a manual command for the
+human-filed backlog.
 
 There is no hand-off between automations and no custom webhook receiver: the merged-PR event
-starts one CYCLE invocation, and that invocation owns verification, fan-out, waiting and the
+starts one find-and-fix invocation, and that invocation owns verification, fan-out, waiting and the
 report. Each stage publishes its own outcome before it exits, so there is no sweeper and no
 digest job. `register` deletes automations still registered under retired names (MAP, REDUCE,
-REPORT, TESTING and the label-triggered AUTOPR).
+REPORT, TESTING and both AUTOPR variants).
 
 The automations are created with `run_as: {"type": "organization"}` and a network policy
 allowing `git-manager.devin.ai`, `github.com`, `api.github.com`, `api.devin.ai` and `pypi.org`. The exact payloads are built in
@@ -302,7 +305,7 @@ TESTING run does not file it twice, and a replayed issue event finds the live `i
 session or the open fix PR and starts nothing. And each filed issue records its
 `regression_depth`; a PR that closes a regression issue inherits it, so after `MAX_CHAIN_DEPTH`
 failed automated attempts on the same chain the run writes `regression_escalated` on the PR and
-stops instead of spending ACUs in a cycle.
+stops instead of spending ACUs in a find-and-fix.
 
 ## Development
 
@@ -318,8 +321,8 @@ CI (`.github/workflows/ci.yml`) runs the same plus `docker compose build` and a 
 
 ## Deviations from the brief
 
-* **Cadence.** Fix sessions start on Fridays; verification runs on every *n*th merge into
-  `VERIFY_BRANCH` (see above). The counter is not held by the automation — it cannot be, there is
+* **Cadence.** Nothing runs on a clock. Verification runs on every merge into `VERIFY_BRANCH`
+  by default, or every *n*th with `VERIFY_EVERY_N_MERGES=n`. The counter is not held by the automation — it cannot be, there is
   no callback action — but computed from the branch's merged-PR history on each event.
 * **Regression guards.** TESTING runs the probes for already-landed fixes too, not only the PR's
   own issue — that is what "no regressions since last time" actually requires.
