@@ -10,27 +10,27 @@ merged PR gets verified, whether the fix worked — is made by code in this repo
 covered by `tests/`.
 
 ```
-PR merges into master ──► CYCLE (one invocation, one daemon-style pass)
+PR merges into master ──► verify-fix-report (one invocation, one daemon-style pass)
    1. TESTING: every merge (VERIFY_EVERY_N_MERGES=1; set 5 for every 5th), one verification session on a Devin VM
       (clone Superset at HEAD and BASE, Postgres + Redis, build, boot, probes),
       wait for the verdict, comment it on every PR of the window
    2. acceptance_met == false ──► regression issues labelled `sda-regression`
-   3. every open `sda-regression` issue opened in the last CYCLE_ISSUE_WINDOW_HOURS
+   3. every open `sda-regression` issue opened in the last REGRESSION_ISSUE_WINDOW_HOURS
       (default 24) that has no fix in flight ──► one fix session each, on its own VM
    4. wait for all of them (zero is fine) ──► verdict, PR and ACUs on each issue
-   5. one CYCLE report on the `sda-status` issue ──► fix PRs merge ──► back to 1
+   5. one verify-fix-report report on the `sda-status` issue ──► fix PRs merge ──► back to 1
 ```
 
 | Name | Trigger | What the orchestrator does |
 |------|---------|----------------------------|
-| **CYCLE** — `superset-devin-automation: CYCLE (merge -> verify, fix regressions, report)` | `github:pull_request` with `action == "closed"`, `pull_request.merged == true`, `repository.full_name == "jhomer192/superset"` | `python -m orchestrator cycle --event-json <path>`: steps 1–5 above (`orchestrator/cycle.py`, wrapping `testing_job.run_testing`, `regression.start_regression_fix` and `autopr_job.publish_fixes`). Issues without TESTING's `regression_depth` record, issues an open PR already closes, and issues whose fix session is still running are skipped and listed in the report. |
+| **verify-fix-report** — `superset-devin-automation: verify merged PR, fix regressions, report` | `github:pull_request` with `action == "closed"`, `pull_request.merged == true`, `repository.full_name == "jhomer192/superset"` | `python -m orchestrator verify-fix-report --event-json <path>`: steps 1–5 above (`orchestrator/verify_fix_report.py`, wrapping `testing_job.run_testing`, `regression.start_regression_fix` and `autopr_job.publish_fixes`). Issues without TESTING's `regression_depth` record, issues an open PR already closes, and issues whose fix session is still running are skipped and listed in the report. |
 
-CYCLE is the only automation; there is no schedule. `python -m orchestrator autopr --wait` (triage every open
+verify-fix-report is the only automation; there is no schedule. `python -m orchestrator autopr --wait` (triage every open
 `ready` issue, one fix session each, wait, post each verdict/PR/ACUs) remains a manual command for the
 human-filed backlog.
 
 There is no hand-off between automations and no custom webhook receiver: the merged-PR event
-starts one CYCLE invocation, and that invocation owns verification, fan-out, waiting and the
+starts one verify-fix-report invocation, and that invocation owns verification, fan-out, waiting and the
 report. Each stage publishes its own outcome before it exits, so there is no sweeper and no
 digest job. `register` deletes automations still registered under retired names (MAP, REDUCE,
 REPORT, TESTING and both AUTOPR variants).
@@ -305,7 +305,7 @@ TESTING run does not file it twice, and a replayed issue event finds the live `i
 session or the open fix PR and starts nothing. And each filed issue records its
 `regression_depth`; a PR that closes a regression issue inherits it, so after `MAX_CHAIN_DEPTH`
 failed automated attempts on the same chain the run writes `regression_escalated` on the PR and
-stops instead of spending ACUs in a cycle.
+stops instead of spending ACUs in a verify-fix-report.
 
 ## Development
 

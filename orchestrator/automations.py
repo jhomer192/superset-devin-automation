@@ -1,9 +1,9 @@
-"""Build and register the one automation (CYCLE) through the Automations API.
+"""Build and register the one automation (verify-fix-report) through the Automations API.
 
-CYCLE is the daemon: a PR merges -> verify (every merge by default; VERIFY_EVERY_N_MERGES=5 for
+verify-fix-report is the daemon: a PR merges -> verify (every merge by default; VERIFY_EVERY_N_MERGES=5 for
 every 5th), wait for the verdict, post it on every PR of the window, file an `sda-regression`
 issue on failure -> start one fix session per `sda-regression` issue opened in the last N hours ->
-wait for all of them (none is fine) -> append the cycle report to the status issue -> the fix PRs
+wait for all of them (none is fine) -> append the verify-fix-report report to the status issue -> the fix PRs
 merge and re-enter the loop. Each stage publishes its own telemetry; there is no sweeper and no
 schedule. Automations under retired names (MAP, REDUCE, REPORT, TESTING, AUTOPR) are deleted on
 register.
@@ -16,7 +16,7 @@ Design constraints honoured here (see AutomationCreateRequest in the spec):
 * run_as = {"type": "organization"} on all of them
 * no limits.max_acu_limit, no concurrency caps, no timeouts
 * net_policy allows the git proxy, GitHub, the Devin API and PyPI; the shim needs nothing else
-* prompts are thin shims: clone this repo, run `python -m orchestrator <cycle|autopr> --wait`
+* prompts are thin shims: clone this repo, run `python -m orchestrator <verify-fix-report|autopr> --wait`
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from .regression import REGRESSION_LABEL
 
 SCHEMAS_PATH = Path(__file__).with_name("v3_schemas.json")
 FRIDAY_RRULE = "FREQ=WEEKLY;BYDAY=FR"
-CYCLE_NAME = "superset-devin-automation: CYCLE (merge -> verify, fix regressions, report)"
+VFR_NAME = "superset-devin-automation: verify merged PR, fix regressions, report"
 RETIRED_NAMES = (
     "superset-devin-automation: AUTOPR (Friday ready-issue sweep)",
     "superset-devin-automation: CYCLE (verify every 5th merge, fix regressions, report)",
@@ -81,7 +81,7 @@ def _env_prefix(name: str, playbook_id: str | None) -> str:
     return f"{name}={playbook_id} " if playbook_id else ""
 
 
-def cycle_payload(
+def vfr_payload(
     target_repo: str,
     automation_repo: str,
     verify_branch: str = "master",
@@ -94,10 +94,10 @@ def cycle_payload(
         _shim(
             automation_repo,
             f"VERIFY_BRANCH={verify_branch} VERIFY_EVERY_N_MERGES={every_n} "
-            f"CYCLE_ISSUE_WINDOW_HOURS={issue_window_hours} "
+            f"REGRESSION_ISSUE_WINDOW_HOURS={issue_window_hours} "
             + _env_prefix("PLAYBOOK_ID_VERIFY", playbook_id_verify)
             + _env_prefix("PLAYBOOK_ID_FIX", playbook_id_fix)
-            + "python -m orchestrator cycle --event-json event.json  "
+            + "python -m orchestrator verify-fix-report --event-json event.json  "
             "(first write the appended pull_request event payload to event.json, unmodified)",
         )
         + f"\nTarget repository: @{target_repo}\n"
@@ -105,15 +105,15 @@ def cycle_payload(
         f"merged into `{verify_branch}`; on other merges it records the count and exits. Otherwise it "
         "blocks until that verification finishes, posts the verdict on every PR of the window, files a "
         f"`{REGRESSION_LABEL}` issue if it failed, starts one fix session per `{REGRESSION_LABEL}` issue "
-        f"opened in the last {issue_window_hours}h, waits for all of them and appends the cycle report to "
+        f"opened in the last {issue_window_hours}h, waits for all of them and appends the run report to "
         "the status issue. It can run for hours. Do not interrupt it.\n"
     )
     return {
-        "name": CYCLE_NAME,
+        "name": VFR_NAME,
         "enabled": True,
         "run_as": {"type": "organization"},
         "metadata": {
-            "component": "cycle",
+            "component": "verify-fix-report",
             "target_repo": target_repo,
             "verify_branch": verify_branch,
             "verify_every_n_merges": str(every_n),
@@ -141,7 +141,7 @@ def cycle_payload(
             {
                 "type": "start_session",
                 "prompt": prompt,
-                "session": {"tags": ["sda-cycle"]},
+                "session": {"tags": ["sda-verify-fix-report"]},
             }
         ],
         "session_settings": {"net_policy": NET_POLICY},
@@ -201,7 +201,7 @@ def register(
     results: list[dict[str, Any]] = []
     existing = {a.get("name"): a for a in devin.list_automations()} if not dry_run else {}
     payloads = (
-        cycle_payload(
+        vfr_payload(
             target_repo,
             automation_repo,
             verify_branch,

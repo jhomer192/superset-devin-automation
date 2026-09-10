@@ -21,7 +21,7 @@ class Settings:
     ready_label: str
     verify_branch: str
     verify_every_n_merges: int
-    cycle_issue_window_hours: int
+    regression_issue_window_hours: int
     playbook_id_fix: str | None
     playbook_id_verify: str | None
     simulate: bool
@@ -57,9 +57,9 @@ def load_settings(simulate: bool = False) -> Settings:
     every = int(env.get("VERIFY_EVERY_N_MERGES", "1") or 1)
     if every < 1:
         raise SystemExit("VERIFY_EVERY_N_MERGES must be >= 1")
-    window_hours = int(env.get("CYCLE_ISSUE_WINDOW_HOURS", "24") or 24)
+    window_hours = int(env.get("REGRESSION_ISSUE_WINDOW_HOURS", "24") or 24)
     if window_hours < 1:
-        raise SystemExit("CYCLE_ISSUE_WINDOW_HOURS must be >= 1")
+        raise SystemExit("REGRESSION_ISSUE_WINDOW_HOURS must be >= 1")
     return Settings(
         devin_api_base=env.get("DEVIN_API_BASE", "https://api.devin.ai").rstrip("/"),
         # the second names are the Devin secret names this loop is provisioned with
@@ -71,7 +71,7 @@ def load_settings(simulate: bool = False) -> Settings:
         ready_label=env.get("READY_LABEL", "ready"),
         verify_branch=env.get("VERIFY_BRANCH", "master"),
         verify_every_n_merges=every,
-        cycle_issue_window_hours=window_hours,
+        regression_issue_window_hours=window_hours,
         playbook_id_fix=env.get("PLAYBOOK_ID_FIX") or None,
         playbook_id_verify=env.get("PLAYBOOK_ID_VERIFY") or None,
         simulate=simulate or env.get("SIMULATE", "").lower() in {"1", "true", "yes"},
