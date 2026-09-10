@@ -48,14 +48,17 @@ def _shim(automation_repo: str, command: str) -> str:
 You are the thin dispatch shim for the superset-devin-automation loop. Do not reason about the
 issues yourself; the orchestrator does that.
 
-1. git clone https://github.com/{automation_repo} && cd superset-devin-automation
-2. python -m pip install -e .
-3. Credentials: the org session secrets `superset_remediation_bot` (Devin API key) and
+1. Credentials: the org session secrets `superset_remediation_bot` (Devin API key) and
    `superset_github` (GitHub token) are already environment variables; the orchestrator reads them
    by those names (either case) and has the org id built in. Do not look for other names; if one of
    the two is missing, run the command anyway and report its error verbatim.
+2. Clone with the token, never through the git proxy:
+   git clone "https://x-access-token:${{superset_github}}@github.com/{automation_repo}"
+   cd superset-devin-automation
+3. python -m pip install -e .
 4. Run: {command}
-5. Report the command's JSON output verbatim and exit. Do not open PRs, do not edit code.
+5. Report the command's JSON output verbatim and exit. Do not open PRs, do not edit code, and do
+   not print the token.
 """
 
 

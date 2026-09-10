@@ -235,7 +235,8 @@ runs hourly and writes the same information to GitHub. For each `sda-fix` / `sda
 that has reached a terminal state it appends one ledger comment to the issue or PR the session
 belongs to — verdict (`acceptance_met`, or the `error_message`), per-probe BASE/HEAD exit codes,
 ACUs from `GET /consumption/daily/sessions/{id}`, and the session URL — and every
-`REPORT_DIGEST_EVERY_HOURS` it appends the metrics table above to `REPORT_DIGEST_ISSUE`. Sessions
+`REPORT_DIGEST_EVERY_HOURS` it appends the metrics table above to `REPORT_DIGEST_ISSUE`
+(live: https://github.com/jhomer192/superset/issues/22). Sessions
 still running or waiting for a human are left alone until they finish, and a `session_reported`
 marker already on the thread means the run skips that session, so the automation is safe to run as
 often as you like. Polling is the mechanism because automations have no completion callback — the
