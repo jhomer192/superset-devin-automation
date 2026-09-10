@@ -71,13 +71,32 @@ pip install -e . && python -m orchestrator simulate
 ```
 
 `simulate` swaps the Devin and GitHub clients for in-memory fakes seeded from `fixtures/`
-(a snapshot of the fork's issues and a merged-PR webhook body) and walks the loop: a merged-PR
-event starts one verification and posts its verdict on every PR of the window; a failing
-verification files one `sda-regression` issue and starts one fix session for it; a replayed
-event posts nothing twice; the manual `autopr` sweep triages the `ready` backlog; the
-automation and playbook payloads are dry-run validated. Every structured output the fakes emit
-is validated against the same schemas live sessions get (`orchestrator/schema.py`), so the
-simulation cannot pass with a payload a real session would be rejected for.
+(a snapshot of the fork's issues and a merged-PR webhook body) and walks the whole loop:
+
+1. **Sweep 1, AUTOPR** — 9 `ready` issues scanned; #12 and #15 (dependency refreshes)
+   are deflected at zero ACU with a logged reason; 7 fix sessions start.
+   AUTOPR waits for all seven: #5's lands PR #14 and its verdict, PR and ACUs are posted on #5;
+   the other six error out and get their error comment.
+2. **Sweep 1 rerun** — the errored issues are retried; #5 is closed and starts nothing.
+3. **PR #14 merges** as the 5th merge →
+   **TESTING** starts one verification session, waits for it (the fake finishes while TESTING
+   sleeps), and posts the verdict, probe exit codes and ACUs onto all five PRs of the window;
+   replaying the same webhook is deduplicated on `(pr_url, merge_commit_sha)`.
+4. **A later 5th merge fails verification** → TESTING files one issue labelled `sda-regression`
+   with the window, SHAs and failing probes. The fake `github:issues` event for that issue runs
+   **AUTOPR**, which starts exactly one fix session, waits for it, and posts the fix PR it opened
+   onto the issue; replaying the event finds that open PR and starts nothing, and an issue a human
+   created with the same label starts nothing (no `regression_depth` record).
+5. **Sweep 2** — errored issues are retried; the merged issue is gone from the `ready`
+   list.
+6. The automation payloads are dry-run validated.
+7. **Playbooks** are registered into the fake org twice (same two ids both times), and one more
+   sweep with those ids shows every fix prompt carrying the `@playbook:` token; the earlier steps
+   ran with the ids unset, exercising the inline fallback.
+
+Every structured output the fakes emit is validated against the same schemas live sessions
+get (`orchestrator/schema.py`), so the simulation cannot pass with a payload a real session
+would be rejected for.
 
 ### Live
 
@@ -86,19 +105,21 @@ cp .env.example .env         # fill DEVIN_API_KEY, DEVIN_ORG_ID, GITHUB_TOKEN, V
 docker compose run --rm orchestrator register-playbooks --dry-run   # print validated playbook payloads
 docker compose run --rm orchestrator register-playbooks   # create/update both playbooks; prints PLAYBOOK_ID_*
 # put the printed PLAYBOOK_ID_FIX / PLAYBOOK_ID_VERIFY in .env, then:
-docker compose run --rm orchestrator register --dry-run   # print the validated automation payload
-docker compose run --rm orchestrator register             # create/update find-and-fix (the shim carries the ids)
-docker compose run --rm orchestrator find-and-fix --event-json /events/pr.json   # one merged-PR event, by hand
-docker compose run --rm orchestrator autopr --wait        # the manual sweep of the `ready` backlog
+docker compose run --rm orchestrator register --dry-run   # print validated automation payloads
+docker compose run --rm orchestrator register             # create/update the find-and-fix automation (shim carries the ids)
+docker compose run --rm orchestrator autopr               # manual sweep of the `ready` issues
+docker compose run --rm orchestrator autopr --wait --event-json /events/issue.json   # one github:issues event
+docker compose run --rm orchestrator find-and-fix --event-json /events/pr.json   # what a merge triggers
 ```
 
 Inside a Devin session the same values are available as the org secret
 `superset_remediation_bot` (Devin API key, service user `superset-remediation-bot`) and the
-secret `superset_github` (GitHub PAT for `jhomer192`). Sessions the automation starts read
+secret `superset_github` (GitHub PAT for `jhomer192`). Sessions the automations start read
 those two names, so both must have org access, and the Devin GitHub app must be installed on the
 target repository (or `github:pull_request` never fires) and on this one (or the shim's clone is
-refused). `register` and `register-playbooks` are idempotent: they update by automation name /
-playbook title (`PUT`) rather than creating duplicates.
+refused). `register` and
+`register-playbooks` are idempotent: they update by automation name / playbook title
+(`PUT`) rather than creating duplicates.
 
 Secrets come from environment variables only; `.env.example` ships with empty values and
 `.env` is git-ignored. `orchestrator/config.py` is the complete list of settings.
@@ -112,14 +133,14 @@ issue was labelled by hand and nothing starts); an open PR closing it or a live 
 session means skip; else one fix session starts from the recorded PR, HEAD and probes
 (`start_regression_fix` in `orchestrator/regression.py`).
 
-On the Friday sweep, for every open issue labelled `ready`, in order:
+On the manual `autopr` sweep, for every open issue labelled `ready`, in order:
 
 1. **Already in flight?** An open PR whose body closes the issue, or a Devin session tagged
    `issue-<n>` that still holds its slot, means skip. Liveness follows the v3 status enum
    exactly (`orchestrator/sessions.py`): `new`/`claimed`/`running`/`resuming` are live;
    `exit`/`error` are dead; `suspended` splits on `status_detail` — `waiting_for_user`,
    `waiting_for_approval`, `inactivity` are live and awaiting a human, the usage/credit/quota
-   details are terminal, and any unknown detail is treated as still live so a Friday never
+   details are terminal, and any unknown detail is treated as still live so a sweep never
    opens a duplicate.
 2. **Triage** (`orchestrator/triage.py`). Zero-ACU deflection, with the reason written to the
    issue, for: dependency refreshes (Dependabot is disabled on this fork — security updates
@@ -157,7 +178,7 @@ from mutable state:
 
 ```
 VERIFY_BRANCH=main            # only PRs merged into this branch count (default: master)
-VERIFY_EVERY_N_MERGES=5       # verify when count % n == 0 (default: 5)
+VERIFY_EVERY_N_MERGES=5       # verify when count % n == 0 (default: 1)
 ```
 
 On each event, `run_testing` lists the PRs merged into `VERIFY_BRANCH` (`GET /pulls?state=closed&base=…`,
