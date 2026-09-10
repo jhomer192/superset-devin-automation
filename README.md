@@ -112,6 +112,9 @@ docker compose run --rm orchestrator autopr --wait --event-json /events/issue.js
 docker compose run --rm orchestrator find-and-fix --event-json /events/pr.json   # what a merge triggers
 ```
 
+`events/` is mounted into the container; drop a GitHub webhook body there
+(`fixtures/merged_pr_event.json` is the shape `find-and-fix` expects).
+
 Inside a Devin session the same values are available as the org secret
 `superset_remediation_bot` (Devin API key, service user `superset-remediation-bot`) and the
 secret `superset_github` (GitHub PAT for `jhomer192`). Sessions the automations start read
