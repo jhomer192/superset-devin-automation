@@ -35,6 +35,7 @@ Workflow:
    anywhere (no Co-Authored-By, no "Generated with").
 
 Structured output rules (enforced by schema):
+- every status: include issue={spec.number}.
 - status "pr_opened": include pr_url, branch, acceptance_met=true, probe_command, probe_exit_code=0,
   base_probe_exit_code (non-zero), and evidence (the tail of the probe output at head and base).
 - status "no_change_needed": only if the probes already pass at master; include the same fields.
@@ -83,9 +84,11 @@ Workflow:
    test command output. PR title in Conventional Commits form. No AI-attribution footers.
 
 Structured output rules (enforced by schema):
+- every status: include issue={issue_number}.
 - status "pr_opened": include pr_url, branch, acceptance_met=true, probe_command, probe_exit_code=0,
   base_probe_exit_code (non-zero), and evidence (probe output at base and head plus the test run).
-- status "no_change_needed": only when the probes already pass before any change.
+- status "no_change_needed": only when the probes already pass before any change; include the same
+  fields.
 - status "error": include error_message only; do NOT include acceptance_met or pr_url.
 acceptance_met is the probe's exit code being 0, nothing else.
 """
