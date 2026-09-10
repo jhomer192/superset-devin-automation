@@ -4,17 +4,18 @@ An event-driven remediation and regression-verification loop for
 [jhomer192/superset](https://github.com/jhomer192/superset), driven by the
 [Devin v3 API](https://docs.devin.ai/v3-openapi.yaml).
 
-Two Devin Automations exist. Both are thin shims: the session they start clones this repo
+Three Devin Automations exist. All are thin shims: the session they start clones this repo
 and runs `python -m orchestrator ...`. Every decision — which issue gets a session, whether a
 merged PR gets verified, whether the fix worked — is made by code in this repository and is
 covered by `tests/`.
 
 | Name | Trigger | What the orchestrator does |
 |------|---------|----------------------------|
-| **MAP** — `sda-map-friday` | `schedule:recurring`, condition `{field:"rrule", operator:"recurrence", value:"FREQ=WEEKLY;BYDAY=FR"}` | `python -m orchestrator map`: list open issues labelled `ready`, triage each one, start **at most one** fix session per eligible issue. |
-| **REDUCE** — `sda-reduce-merged-pr` | `github:pull_request` with `action == "closed"`, `pull_request.merged == true`, `repository.full_name == "jhomer192/superset"` | `python -m orchestrator reduce --event-json <path>`: start **one** verification session for the merged commit that clones Superset, stands up Postgres, builds the frontend, boots the app, and runs the committed probes at HEAD *and* at BASE. |
+| **MAP** — `superset-devin-automation: MAP (Friday ready-issue sweep)` | `schedule:recurring`, condition `{field:"rrule", operator:"recurrence", value:"FREQ=WEEKLY;BYDAY=FR"}` | `python -m orchestrator map`: list open issues labelled `ready`, triage each one, start **at most one** fix session per eligible issue. |
+| **REDUCE** — `superset-devin-automation: REDUCE (verify merged PR)` | `github:pull_request` with `action == "closed"`, `pull_request.merged == true`, `repository.full_name == "jhomer192/superset"` | `python -m orchestrator reduce --event-json <path>`: start **one** verification session for the merged commit that clones Superset, stands up Postgres, builds the frontend, boots the app, and runs the committed probes at HEAD *and* at BASE. |
+| **REPORT** — `superset-devin-automation: REPORT (publish session outcomes)` | `schedule:recurring`, `FREQ=HOURLY` | `python -m orchestrator report`: publish the verdict of every finished fix/verification session onto the issue or PR it belongs to, and append a metrics digest to the tracking issue at most once per `REPORT_DIGEST_EVERY_HOURS`. |
 
-Both automations are created with `run_as: {"type": "organization"}` and a network policy
+The automations are created with `run_as: {"type": "organization"}` and a network policy
 allowing `git-manager.devin.ai`. The exact payloads are built in
 `orchestrator/automations.py` and validated against the OpenAPI components vendored in
 `orchestrator/v3_schemas.json` before anything is sent.
@@ -39,10 +40,12 @@ pip install -e . && python -m orchestrator simulate
    verification session; replaying the same webhook is deduplicated on
    `(pr_url, merge_commit_sha)`.
 4. **The verification session finishes** with a schema-valid structured output whose
-   `acceptance_met` was decided by probe exit codes.
+   `acceptance_met` was decided by probe exit codes; **REPORT** then posts that verdict, the
+   probe exit codes and the ACUs onto PR #14 (and each finished fix session's verdict onto its
+   issue), and a second run posts nothing.
 5. **Friday 2, MAP** — sessions still waiting for a human keep their slot; a dead session's
    issue is retried; the merged issue is gone from the `ready` list.
-6. **Metrics** are computed over the fake sessions, and the two automation payloads are
+6. **Metrics** are computed over the fake sessions, and the automation payloads are
    dry-run validated.
 
 Every structured output the fakes emit is validated against the same schemas live sessions
@@ -54,16 +57,17 @@ would be rejected for.
 ```bash
 cp .env.example .env         # fill DEVIN_API_KEY, DEVIN_ORG_ID, GITHUB_TOKEN, VERIFY_BRANCH, VERIFY_EVERY_N_MERGES
 docker compose run --rm orchestrator register --dry-run   # print validated payloads
-docker compose run --rm orchestrator register             # create/update both automations
+docker compose run --rm orchestrator register             # create/update the automations
 docker compose run --rm orchestrator map                  # what Friday would do, right now
 docker compose run --rm orchestrator reduce --event-json /events/pr.json
+docker compose run --rm orchestrator report --days 30
 docker compose run --rm orchestrator metrics --days 30
 ```
 
 Inside a Devin session the same values are available as the org secret
 `superset_remediation_bot` (Devin API key, service user `superset-remediation-bot`) and the
 personal secret `superset_github_key` (GitHub PAT for `jhomer192`). `register` is idempotent:
-it updates the two automations by name rather than creating duplicates.
+it updates the automations by name rather than creating duplicates.
 
 Secrets come from environment variables only; `.env.example` ships with empty values and
 `.env` is git-ignored. `orchestrator/config.py` is the complete list of settings.
@@ -179,8 +183,50 @@ executes both schemas against passing and failing payloads.
 | `verification_pass_rate` | verification sessions with `acceptance_met == true` ÷ verification sessions with a non-error output | sessions still running are excluded |
 | `triage_deflections` | `triage_deflected` ledger comments on the target repo's issues | needs `GITHUB_TOKEN`; 0 without it |
 | `liveness` | count per liveness bucket (live / awaiting_human / dead / terminal_suspended / unknown_suspended) | point-in-time |
+| `regression_issues`, `regression_fix_prs`, `regressions[]` | issues this loop filed off a failed verification, with the fix session, its status and the PR it produced | only issues filed by the loop itself |
+| `pr_metrics` | `GET /metrics/prs`: PRs Devin created / opened / merged / closed | organization-wide |
+| `total_acus`, `org_total_acus`, `estimated_cost_usd` | this loop's ACUs, the organization's ACUs from `GET /consumption/daily`, and money | the API prices nothing; USD appears only when `ACU_USD` is set |
 
 The report also carries a `limitations` list so a reader never has to infer them.
+
+Nobody has to run that command, though: the **REPORT** automation (`orchestrator/report_job.py`)
+runs hourly and writes the same information to GitHub. For each `sda-fix` / `sda-verify` session
+that has reached a terminal state it appends one ledger comment to the issue or PR the session
+belongs to — verdict (`acceptance_met`, or the `error_message`), per-probe BASE/HEAD exit codes,
+ACUs from `GET /consumption/daily/sessions/{id}`, and the session URL — and every
+`REPORT_DIGEST_EVERY_HOURS` it appends the metrics table above to `REPORT_DIGEST_ISSUE`. Sessions
+still running or waiting for a human are left alone until they finish, and a `session_reported`
+marker already on the thread means the run skips that session, so the automation is safe to run as
+often as you like. Polling is the mechanism because automations have no completion callback — the
+same constraint that makes the REDUCE cadence counter derived rather than stored.
+
+### What polling costs
+
+Each REPORT invocation starts one Devin session, whether or not anything finished in the meantime:
+hourly means ~720 sessions a month, each doing one API-driven command. That is real spend, so the
+digest reports it on its own line (`ACUs polling (REPORT itself)`, read from the `sda-report`
+sessions) instead of hiding it in the loop's totals, and the ACU figures for fix/verify work
+exclude it. If the price is not worth the freshness, lower the cadence: nothing in the loop
+depends on the interval, since every published comment is keyed by session id and skipped on the
+next run.
+
+## Self-healing
+
+A verification whose structured output says `acceptance_met == false` has found a probe that
+fails on a commit already on `master`. REPORT files that verdict as work
+(`orchestrator/regression.py`): it opens an issue on the target repo labelled
+`regression`/`automation` carrying the PR, the HEAD and BASE SHAs, the probe table with both exit
+codes and the captured evidence, then starts a fix session tagged `sda-fix`/`sda-regression` for
+it. That session must reproduce the failure before touching anything, make the smallest fix, add
+a test, and run the probes and the surrounding unit tests before opening its PR — and when that
+PR merges, REDUCE verifies it like any other. The probes are the contract in both directions:
+the issue states they must not be edited or relaxed.
+
+Two things keep the loop finite. A `regression_filed` marker on the PR thread means the failure
+already has an issue, so re-running REPORT files nothing. And each filed issue records its
+`regression_depth`; a PR that closes a regression issue inherits it, so after `MAX_CHAIN_DEPTH`
+failed automated attempts on the same chain the run writes `regression_escalated` on the PR and
+stops instead of spending ACUs in a cycle.
 
 ## Development
 
