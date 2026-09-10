@@ -11,9 +11,9 @@ covered by `tests/`.
 
 | Name | Trigger | What the orchestrator does |
 |------|---------|----------------------------|
-| **MAP** — `sda-map-friday` | `schedule:recurring`, condition `{field:"rrule", operator:"recurrence", value:"FREQ=WEEKLY;BYDAY=FR"}` | `python -m orchestrator map`: list open issues labelled `ready`, triage each one, start **at most one** fix session per eligible issue. |
-| **REDUCE** — `sda-reduce-merged-pr` | `github:pull_request` with `action == "closed"`, `pull_request.merged == true`, `repository.full_name == "jhomer192/superset"` | `python -m orchestrator reduce --event-json <path>`: start **one** verification session for the merged commit that clones Superset, stands up Postgres, builds the frontend, boots the app, and runs the committed probes at HEAD *and* at BASE. |
-| **REPORT** — `sda-report-hourly` | `schedule:recurring`, `FREQ=HOURLY` | `python -m orchestrator report`: publish the verdict of every finished fix/verification session onto the issue or PR it belongs to, and append a metrics digest to the tracking issue at most once per `REPORT_DIGEST_EVERY_HOURS`. |
+| **MAP** — `superset-devin-automation: MAP (Friday ready-issue sweep)` | `schedule:recurring`, condition `{field:"rrule", operator:"recurrence", value:"FREQ=WEEKLY;BYDAY=FR"}` | `python -m orchestrator map`: list open issues labelled `ready`, triage each one, start **at most one** fix session per eligible issue. |
+| **REDUCE** — `superset-devin-automation: REDUCE (verify merged PR)` | `github:pull_request` with `action == "closed"`, `pull_request.merged == true`, `repository.full_name == "jhomer192/superset"` | `python -m orchestrator reduce --event-json <path>`: start **one** verification session for the merged commit that clones Superset, stands up Postgres, builds the frontend, boots the app, and runs the committed probes at HEAD *and* at BASE. |
+| **REPORT** — `superset-devin-automation: REPORT (publish session outcomes)` | `schedule:recurring`, `FREQ=HOURLY` | `python -m orchestrator report`: publish the verdict of every finished fix/verification session onto the issue or PR it belongs to, and append a metrics digest to the tracking issue at most once per `REPORT_DIGEST_EVERY_HOURS`. |
 
 The automations are created with `run_as: {"type": "organization"}` and a network policy
 allowing `git-manager.devin.ai`. The exact payloads are built in
@@ -190,21 +190,30 @@ executes both schemas against passing and failing payloads.
 The report also carries a `limitations` list so a reader never has to infer them.
 
 Nobody has to run that command, though: the **REPORT** automation (`orchestrator/report_job.py`)
-runs hourly and pushes the same information into GitHub, where the audience already is. For each
-`sda-fix` / `sda-verify` session that has reached a terminal state it appends one ledger comment
-to the issue or PR the session belongs to — verdict (`acceptance_met`, or the `error_message`),
-per-probe BASE/HEAD exit codes, ACUs from `GET /consumption/daily/sessions/{id}`, and the session
-URL — and every `REPORT_DIGEST_EVERY_HOURS` it appends the metrics table above to
-`REPORT_DIGEST_ISSUE`. Sessions still running or waiting for a human are left alone until they
-finish, and a `session_reported` marker already on the thread means the run skips that session, so
-the automation is safe to run as often as you like. Polling is the mechanism because automations
-have no completion callback — the same constraint that makes the REDUCE cadence counter derived
-rather than stored.
+runs hourly and writes the same information to GitHub. For each `sda-fix` / `sda-verify` session
+that has reached a terminal state it appends one ledger comment to the issue or PR the session
+belongs to — verdict (`acceptance_met`, or the `error_message`), per-probe BASE/HEAD exit codes,
+ACUs from `GET /consumption/daily/sessions/{id}`, and the session URL — and every
+`REPORT_DIGEST_EVERY_HOURS` it appends the metrics table above to `REPORT_DIGEST_ISSUE`. Sessions
+still running or waiting for a human are left alone until they finish, and a `session_reported`
+marker already on the thread means the run skips that session, so the automation is safe to run as
+often as you like. Polling is the mechanism because automations have no completion callback — the
+same constraint that makes the REDUCE cadence counter derived rather than stored.
+
+### What polling costs
+
+Each REPORT invocation starts one Devin session, whether or not anything finished in the meantime:
+hourly means ~720 sessions a month, each doing one API-driven command. That is real spend, so the
+digest reports it on its own line (`ACUs polling (REPORT itself)`, read from the `sda-report`
+sessions) instead of hiding it in the loop's totals, and the ACU figures for fix/verify work
+exclude it. If the price is not worth the freshness, lower the cadence: nothing in the loop
+depends on the interval, since every published comment is keyed by session id and skipped on the
+next run.
 
 ## Self-healing
 
 A verification whose structured output says `acceptance_met == false` has found a probe that
-fails on a commit already on `master`. REPORT turns that verdict back into work
+fails on a commit already on `master`. REPORT files that verdict as work
 (`orchestrator/regression.py`): it opens an issue on the target repo labelled
 `regression`/`automation` carrying the PR, the HEAD and BASE SHAs, the probe table with both exit
 codes and the captured evidence, then starts a fix session tagged `sda-fix`/`sda-regression` for
