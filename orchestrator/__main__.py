@@ -1,6 +1,6 @@
 """CLI: python -m orchestrator SUBCOMMAND [--simulate]
 
-Subcommands: verify-fix-report, testing, autopr, register, register-playbooks, simulate.
+Subcommands: find-and-fix, testing, autopr, register, register-playbooks, simulate.
 """
 
 from __future__ import annotations
@@ -18,11 +18,11 @@ from . import automations, playbooks
 from .autopr_job import run_autopr
 from .config import Settings, load_settings
 from .devin_api import DevinClient, LiveDevinClient
+from .find_and_fix import run_find_and_fix
 from .github_api import GitHubClient, LiveGitHubClient
 from .registry import Registry, load_registry
 from .simulate import FakeDevin, FakeGitHub, issue_event, load_event, pr_number
 from .testing_job import run_testing
-from .verify_fix_report import run_verify_fix_report
 
 log = logging.getLogger("orchestrator")
 
@@ -94,7 +94,7 @@ def cmd_testing(
     ).as_dict()
 
 
-def cmd_verify_fix_report(
+def cmd_find_and_fix(
     settings: Settings,
     devin: DevinClient,
     gh: GitHubClient,
@@ -104,10 +104,10 @@ def cmd_verify_fix_report(
     sleep: Callable[[float], None] | None = None,
 ) -> dict[str, Any]:
     if event_json is None and event is None and not settings.simulate:
-        raise SystemExit("verify-fix-report requires --event-json <path> unless --simulate")
+        raise SystemExit("find-and-fix requires --event-json <path> unless --simulate")
     event = event if event is not None else load_event(event_json)
     kwargs: dict[str, Any] = {"sleep": sleep} if sleep is not None else {}
-    return run_verify_fix_report(
+    return run_find_and_fix(
         devin=devin,
         gh=gh,
         registry=registry,
@@ -284,11 +284,11 @@ def main(argv: list[str] | None = None) -> int:
         "--wait", action="store_true", help="block until the verdict, publish it, file the regression"
     )
     p_cycle = sub.add_parser(
-        "verify-fix-report",
+        "find-and-fix",
         help="merged-PR event: verify, fix every recent regression issue, wait for all, report",
     )
     p_cycle.add_argument("--event-json", type=Path, default=None)
-    p_reg = sub.add_parser("register", help="create/update the verify-fix-report and AUTOPR automations")
+    p_reg = sub.add_parser("register", help="create/update the find-and-fix and AUTOPR automations")
     p_reg.add_argument("--dry-run", action="store_true")
     p_pb = sub.add_parser(
         "register-playbooks", help="create/update the remediation and verification playbooks"
@@ -311,8 +311,8 @@ def main(argv: list[str] | None = None) -> int:
         if registering and not args.dry_run and settings.simulate:
             raise SystemExit(f"{args.command} without --dry-run needs live credentials")
         devin, gh = _clients(settings) if not (registering and args.dry_run) else (FakeDevin(), FakeGitHub())
-        if args.command == "verify-fix-report":
-            result = cmd_verify_fix_report(settings, devin, gh, registry, args.event_json)
+        if args.command == "find-and-fix":
+            result = cmd_find_and_fix(settings, devin, gh, registry, args.event_json)
         elif args.command == "autopr":
             result = cmd_autopr(settings, devin, gh, registry, args.event_json, wait=args.wait)
         elif args.command == "testing":

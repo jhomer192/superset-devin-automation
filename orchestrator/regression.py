@@ -37,7 +37,7 @@ REGRESSION_TAG = "sda-regression"
 REGRESSION_LABEL = "sda-regression"
 REGRESSION_LABELS = [REGRESSION_LABEL, "regression"]
 # A fix that regresses again is filed once more; beyond that the chain stops and waits for a human,
-# so a Devin that cannot solve the problem cannot spend the organization's ACUs in a verify-fix-report.
+# so a Devin that cannot solve the problem cannot spend the organization's ACUs in a find-and-fix.
 MAX_CHAIN_DEPTH = 2
 
 

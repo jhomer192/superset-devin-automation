@@ -7,6 +7,7 @@ from orchestrator import automations, playbooks, prompts
 from orchestrator.__main__ import cmd_simulate
 from orchestrator.autopr_job import NotARegressionIssue, extract_regression_issue, run_autopr
 from orchestrator.config import load_settings
+from orchestrator.find_and_fix import run_find_and_fix
 from orchestrator.github_api import closing_issue_numbers
 from orchestrator.ledger import IssueLedger, find
 from orchestrator.publish import publish_verification
@@ -16,7 +17,6 @@ from orchestrator.simulate import FakeDevin, FakeGitHub, issue_event, load_event
 from orchestrator.testing_job import NotAMergedPR, extract_merged_pr, run_testing
 from orchestrator.triage import Decision, Reason
 from orchestrator.triage import classify as triage
-from orchestrator.verify_fix_report import run_verify_fix_report
 
 REPO = "jhomer192/superset"
 AUTO = "jhomer192/superset-devin-automation"
@@ -369,7 +369,10 @@ def test_verify_settings_from_environment(monkeypatch):
 
 
 def test_automation_payloads_validate_against_openapi_and_carry_no_ceilings():
-    for payload in (automations.vfr_payload(REPO, AUTO), automations.vfr_payload(REPO, AUTO, every_n=5)):
+    for payload in (
+        automations.finder_payload(REPO, AUTO),
+        automations.finder_payload(REPO, AUTO, every_n=5),
+    ):
         assert automations.validate_payload(payload) == []
         automations.assert_no_ceilings(payload)
         assert payload["run_as"] == {"type": "organization"}
@@ -380,32 +383,31 @@ def test_automation_payloads_validate_against_openapi_and_carry_no_ceilings():
         assert "python -m orchestrator" in payload["actions"][0]["prompt"]
 
 
-def test_vfr_triggers_on_merged_prs_only_and_verifies_every_merge_by_default():
-    assert "VERIFY_EVERY_N_MERGES=1 " in automations.vfr_payload(REPO, AUTO)["actions"][0]["prompt"]
+def test_finder_triggers_on_merged_prs_only_and_verifies_every_merge_by_default():
+    assert "VERIFY_EVERY_N_MERGES=1 " in automations.finder_payload(REPO, AUTO)["actions"][0]["prompt"]
     assert (
-        "VERIFY_EVERY_N_MERGES=5 " in automations.vfr_payload(REPO, AUTO, every_n=5)["actions"][0]["prompt"]
+        "VERIFY_EVERY_N_MERGES=5 "
+        in automations.finder_payload(REPO, AUTO, every_n=5)["actions"][0]["prompt"]
     )
-    vfr = automations.vfr_payload(REPO, AUTO, issue_window_hours=6)
-    (r,) = vfr["triggers"]
+    finder = automations.finder_payload(REPO, AUTO, issue_window_hours=6)
+    (r,) = finder["triggers"]
     assert r["event_type"] == "github:pull_request"
     conds = {c["field"]: c["value"] for c in r["conditions"]["any"][0]["all"]}
     assert conds == {"action": "closed", "pull_request.merged": True, "repository.full_name": REPO}
-    prompt = vfr["actions"][0]["prompt"]
-    assert (
-        "REGRESSION_ISSUE_WINDOW_HOURS=6 " in prompt and "python -m orchestrator verify-fix-report" in prompt
-    )
+    prompt = finder["actions"][0]["prompt"]
+    assert "REGRESSION_ISSUE_WINDOW_HOURS=6 " in prompt and "python -m orchestrator find-and-fix" in prompt
 
 
 def test_invalid_payloads_are_rejected():
-    bad = automations.vfr_payload(REPO, AUTO)
+    bad = automations.finder_payload(REPO, AUTO)
     bad["limits"] = {"max_acu_limit": 10}
     with pytest.raises(ValueError, match="max_acu_limit"):
         automations.assert_no_ceilings(bad)
-    bad = automations.vfr_payload(REPO, AUTO)
+    bad = automations.finder_payload(REPO, AUTO)
     bad["actions"].append({"type": "start_session", "prompt": "second"})
     with pytest.raises(ValueError, match="at most one"):
         automations.assert_no_ceilings(bad)
-    bad = automations.vfr_payload(REPO, AUTO)
+    bad = automations.finder_payload(REPO, AUTO)
     bad["triggers"][0]["event_type"] = "cron"
     assert automations.validate_payload(bad)
 
@@ -416,7 +418,7 @@ def test_register_is_idempotent_by_name():
     automations.register(devin, REPO, AUTO)
     assert len(devin.automations) == 1
     (only,) = devin.automations.values()
-    assert only["name"] == automations.VFR_NAME and "schedule" not in json.dumps(only["triggers"])
+    assert only["name"] == automations.FINDER_NAME and "schedule" not in json.dumps(only["triggers"])
 
 
 class OrderedDevin(FakeDevin):
@@ -447,7 +449,7 @@ def test_register_deletes_retired_automations_only_after_the_replacements_exist(
     devin = with_retired_automations(OrderedDevin())
     results = automations.register(devin, REPO, AUTO)
     assert devin.order == ["create"] + ["delete"] * len(automations.RETIRED_NAMES)
-    assert {a["name"] for a in devin.automations.values()} == {automations.VFR_NAME}
+    assert {a["name"] for a in devin.automations.values()} == {automations.FINDER_NAME}
     assert [r["name"] for r in results if r.get("deleted")] == list(automations.RETIRED_NAMES)
 
     failing = with_retired_automations(OrderedDevin())
@@ -954,7 +956,7 @@ def test_autopr_run_is_logged_on_the_status_issue_with_pr_and_acus(registry, wor
     assert "pull/900" in body and "ACU" in body
 
 
-# --- verify-fix-report -------------------------------------------------------------------------------------
+# --- find-and-fix -------------------------------------------------------------------------------------
 
 
 def test_a_session_parked_waiting_for_user_with_its_output_written_counts_as_finished():
@@ -975,7 +977,7 @@ def test_a_session_parked_waiting_for_user_with_its_output_written_counts_as_fin
 
 
 def finish_everything(devin, fix_outcome="ok"):
-    """Sleep stand-in for a verify-fix-report: verifications fail, fix sessions land with a PR."""
+    """Sleep stand-in for a find-and-fix: verifications fail, fix sessions land with a PR."""
 
     def _sleep(_seconds):
         for sid, session in list(devin.sessions.items()):
@@ -989,8 +991,8 @@ def finish_everything(devin, fix_outcome="ok"):
     return _sleep
 
 
-def do_vfr(devin, gh, registry, **kwargs):
-    return run_verify_fix_report(
+def do_finder(devin, gh, registry, **kwargs):
+    return run_find_and_fix(
         devin=devin,
         gh=gh,
         registry=registry,
@@ -1004,9 +1006,9 @@ def do_vfr(devin, gh, registry, **kwargs):
     )
 
 
-def test_vfr_verifies_fixes_every_recent_regression_waits_and_reports(registry, world):
+def test_finder_verifies_fixes_every_recent_regression_waits_and_reports(registry, world):
     devin, gh = world
-    out = do_vfr(devin, gh, registry)
+    out = do_finder(devin, gh, registry)
     issue = out.testing["regression_filed"]["issue"]
     assert out.testing["verdict"] == "acceptance NOT met" and out.candidates == [issue]
     (finished,) = out.fixes["finished"]
@@ -1016,36 +1018,36 @@ def test_vfr_verifies_fixes_every_recent_regression_waits_and_reports(registry, 
     assert len(fixes) == 1 and f"issue-{issue}" in fixes[0]["tags"]
     assert out.status_issue is not None
     rollup = gh.comments[out.status_issue][-1]["body"]
-    assert "verify-fix-report:" in rollup and f"#{issue}" in rollup and "total ACUs: 2" in rollup
-    assert find(IssueLedger(gh, REPO).read(out.status_issue), "run_reported", stage="verify-fix-report")
+    assert "find-and-fix:" in rollup and f"#{issue}" in rollup and "total ACUs: 2" in rollup
+    assert find(IssueLedger(gh, REPO).read(out.status_issue), "run_reported", stage="find-and-fix")
 
 
-def test_vfr_replay_starts_nothing_new_and_reports_once(registry, world):
+def test_finder_replay_starts_nothing_new_and_reports_once(registry, world):
     devin, gh = world
-    first = do_vfr(devin, gh, registry)
+    first = do_finder(devin, gh, registry)
     issue = first.testing["regression_filed"]["issue"]
     gh.open_pull(99, title=f"fix: regression #{issue}", body=f"Closes #{issue}")
     before = len(devin.sessions), len(gh.comments[first.status_issue])
-    again = do_vfr(devin, gh, registry)
+    again = do_finder(devin, gh, registry)
     assert again.fixes["started"] == [] and again.status_issue is None
     assert "already closes" in again.fixes["skipped_in_flight"][0]["reason"]
     assert (len(devin.sessions), len(gh.comments[first.status_issue])) == before
 
 
-def test_vfr_ignores_regression_issues_older_than_the_window(registry, world):
+def test_finder_ignores_regression_issues_older_than_the_window(registry, world):
     devin, gh = world
     verify_and_wait(devin, gh, registry)
     for issue in gh.issues.values():
         if any(lb["name"] == "sda-regression" for lb in issue["labels"]):
             issue["created_at"] = "2000-01-01T00:00:00Z"
-    out = do_vfr(devin, gh, registry, issue_window_hours=1)
+    out = do_finder(devin, gh, registry, issue_window_hours=1)
     assert out.candidates == [] and out.fixes["started"] == []
     assert not [s for s in devin.sessions.values() if "sda-fix" in s["tags"]]
 
 
-def test_vfr_on_an_uncounted_merge_only_counts(registry, world):
+def test_finder_on_an_uncounted_merge_only_counts(registry, world):
     devin, gh = world
-    out = run_verify_fix_report(
+    out = run_find_and_fix(
         devin=devin,
         gh=gh,
         registry=registry,
@@ -1169,16 +1171,16 @@ def test_playbook_settings_from_environment(monkeypatch):
 
 
 def test_automation_shim_passes_playbook_ids_through():
-    c = automations.vfr_payload(REPO, AUTO, "main", 5, playbook_id_verify="pb-2", playbook_id_fix="pb-1")
+    c = automations.finder_payload(REPO, AUTO, "main", 5, playbook_id_verify="pb-2", playbook_id_fix="pb-1")
     assert (
-        "PLAYBOOK_ID_VERIFY=pb-2 PLAYBOOK_ID_FIX=pb-1 python -m orchestrator verify-fix-report"
+        "PLAYBOOK_ID_VERIFY=pb-2 PLAYBOOK_ID_FIX=pb-1 python -m orchestrator find-and-fix"
         in c["actions"][0]["prompt"]
     )
     assert automations.validate_payload(c) == []
-    assert "PLAYBOOK_ID" not in automations.vfr_payload(REPO, AUTO)["actions"][0]["prompt"]
+    assert "PLAYBOOK_ID" not in automations.finder_payload(REPO, AUTO)["actions"][0]["prompt"]
 
 
-def test_vfr_fills_trimmed_event_from_the_api(registry, world):
+def test_finder_fills_trimmed_event_from_the_api(registry, world):
     devin, gh = world
     event = load_event()
     trimmed = {

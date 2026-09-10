@@ -1,9 +1,9 @@
-"""Build and register the one automation (verify-fix-report) through the Automations API.
+"""Build and register the one automation (find-and-fix) through the Automations API.
 
-verify-fix-report is the daemon: a PR merges -> verify (every merge by default; VERIFY_EVERY_N_MERGES=5 for
+find-and-fix is the daemon: a PR merges -> verify (every merge by default; VERIFY_EVERY_N_MERGES=5 for
 every 5th), wait for the verdict, post it on every PR of the window, file an `sda-regression`
 issue on failure -> start one fix session per `sda-regression` issue opened in the last N hours ->
-wait for all of them (none is fine) -> append the verify-fix-report report to the status issue -> the fix PRs
+wait for all of them (none is fine) -> append the find-and-fix report to the status issue -> the fix PRs
 merge and re-enter the loop. Each stage publishes its own telemetry; there is no sweeper and no
 schedule. Automations under retired names (MAP, REDUCE, REPORT, TESTING, AUTOPR) are deleted on
 register.
@@ -16,7 +16,7 @@ Design constraints honoured here (see AutomationCreateRequest in the spec):
 * run_as = {"type": "organization"} on all of them
 * no limits.max_acu_limit, no concurrency caps, no timeouts
 * net_policy allows the git proxy, GitHub, the Devin API and PyPI; the shim needs nothing else
-* prompts are thin shims: clone this repo, run `python -m orchestrator <verify-fix-report|autopr> --wait`
+* prompts are thin shims: clone this repo, run `python -m orchestrator <find-and-fix|autopr> --wait`
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from .regression import REGRESSION_LABEL
 
 SCHEMAS_PATH = Path(__file__).with_name("v3_schemas.json")
 FRIDAY_RRULE = "FREQ=WEEKLY;BYDAY=FR"
-VFR_NAME = "superset-devin-automation: verify merged PR, fix regressions, report"
+FINDER_NAME = "superset issue finder and fixer"
 RETIRED_NAMES = (
     "superset-devin-automation: AUTOPR (Friday ready-issue sweep)",
     "superset-devin-automation: CYCLE (verify every 5th merge, fix regressions, report)",
@@ -81,7 +81,7 @@ def _env_prefix(name: str, playbook_id: str | None) -> str:
     return f"{name}={playbook_id} " if playbook_id else ""
 
 
-def vfr_payload(
+def finder_payload(
     target_repo: str,
     automation_repo: str,
     verify_branch: str = "master",
@@ -97,7 +97,7 @@ def vfr_payload(
             f"REGRESSION_ISSUE_WINDOW_HOURS={issue_window_hours} "
             + _env_prefix("PLAYBOOK_ID_VERIFY", playbook_id_verify)
             + _env_prefix("PLAYBOOK_ID_FIX", playbook_id_fix)
-            + "python -m orchestrator verify-fix-report --event-json event.json  "
+            + "python -m orchestrator find-and-fix --event-json event.json  "
             "(first write the appended pull_request event payload to event.json, unmodified)",
         )
         + f"\nTarget repository: @{target_repo}\n"
@@ -109,11 +109,11 @@ def vfr_payload(
         "the status issue. It can run for hours. Do not interrupt it.\n"
     )
     return {
-        "name": VFR_NAME,
+        "name": FINDER_NAME,
         "enabled": True,
         "run_as": {"type": "organization"},
         "metadata": {
-            "component": "verify-fix-report",
+            "component": "find-and-fix",
             "target_repo": target_repo,
             "verify_branch": verify_branch,
             "verify_every_n_merges": str(every_n),
@@ -141,7 +141,7 @@ def vfr_payload(
             {
                 "type": "start_session",
                 "prompt": prompt,
-                "session": {"tags": ["sda-verify-fix-report"]},
+                "session": {"tags": ["sda-find-and-fix"]},
             }
         ],
         "session_settings": {"net_policy": NET_POLICY},
@@ -201,7 +201,7 @@ def register(
     results: list[dict[str, Any]] = []
     existing = {a.get("name"): a for a in devin.list_automations()} if not dry_run else {}
     payloads = (
-        vfr_payload(
+        finder_payload(
             target_repo,
             automation_repo,
             verify_branch,
