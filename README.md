@@ -165,12 +165,12 @@ The session runs `verify/run_all.sh`, which on the Devin VM:
    `VERIFICATION_SCHEMA`, and exits 0 iff acceptance held.
 
 Acceptance is mechanical: a probe for an issue the PR closes must **pass at HEAD and fail at
-BASE** — a probe that already passes before the fix proves nothing and fails the run. A
+BASE**; one that already passes at BASE fails the run (`verification_prompt` states why). A
 probe for an already-landed fix (regression guard) must pass at HEAD.
 
 ## Probes
 
-Each probe is a committed script under `probes/`; its exit code is the verdict. `probes/run.sh
+Each probe is a committed script under `probes/`; only its exit code is read. `probes/run.sh
 <probe-id>` runs one against `SUPERSET_SRC`. Kinds (`orchestrator/registry.py`):
 
 | kind | lane | example |
