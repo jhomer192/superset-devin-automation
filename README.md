@@ -248,13 +248,20 @@ Every v3 endpoint this loop calls, all under `/v3/organizations/{org_id}` (`orch
 
 ## Observability
 
-There is no dashboard job. Each stage writes its record where the work is, in the same run that
-did the work, so an engineering leader reads the PR or issue and sees what happened to it:
+Each stage writes its record where the work is, in the same run that did the work, so an
+engineering leader reads the PR or issue and sees what happened to it:
 
 | stage | where | ledger entries (`<!-- sda:{json} -->`) and what they answer |
 |-------|-------|-------------------------------------------------------------|
 | TESTING | every PR merged into `VERIFY_BRANCH` | `merge_counted` (position k of n: did the merge count?); `verification_started` (session id, HEAD, BASE, window: what is being verified?); `session_reported` (verdict, per-probe BASE/HEAD exit codes, ACUs, session URL: did it pass, what did it cost?); `regression_filed` / `regression_escalated` (issue number, depth: what happened to a failure?) |
 | AUTOPR | the regression issue / each `ready` issue | `regression_depth` (chain depth, PR, window, probes: why does this issue exist?); `session_started` with `trigger: github:issues` or `sweep` (which session, started by what?); `session_reported` (verdict, PR URL, ACUs, session URL: did the fix land, what did it cost?); `triage_deflected` (why nothing started) |
+
+The last step of a run that waited for sessions is the report (`orchestrator/status.py`): one
+comment on the `sda-status` issue in the target repository, created on first use. A TESTING
+comment carries merge position, window, BASE/HEAD, verdict, per-probe exit codes, ACUs and the
+regression issue if one was filed; an AUTOPR comment carries the trigger and, per fix session,
+issue, verdict, session, PR URL and ACUs, then the run's total. Reading that issue top to bottom
+is the run log of the loop, and a replayed run appends nothing (`run_reported` marker).
 
 Reading across threads: the count of `session_reported` fix comments whose PR merged over the
 `session_started` comments is the remediation success rate; `merge_counted` positions are the

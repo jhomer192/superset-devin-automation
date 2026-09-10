@@ -24,10 +24,11 @@ from .devin_api import DevinClient
 from .github_api import GitHubClient, closing_issue_numbers
 from .ledger import IssueLedger, LedgerEntry, find
 from .prompts import verification_prompt
-from .publish import TRIGGER_TAG_PREFIX, publish_verification, verdict
+from .publish import TRIGGER_TAG_PREFIX, publish_verification, session_acus, verdict
 from .registry import Probe, Registry
 from .schema import VERIFICATION_SCHEMA
 from .sessions import holds_slot, wait_until_finished
+from .status import post_run, testing_lines
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +53,7 @@ class TestingReport:
     verdict: str | None = None
     posted_to: list[int] = field(default_factory=list)
     regression_filed: dict[str, Any] | None = None
+    status_issue: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return self.__dict__.copy()
@@ -235,6 +237,7 @@ def run_testing(
 
     finished = wait_until_finished(devin, session_id, sleep)
     report.verdict = verdict(finished.get("structured_output"))
+    acu_cache: dict[str, float] = {}
     posted, filed = publish_verification(
         devin=devin,
         gh=gh,
@@ -243,9 +246,32 @@ def run_testing(
         automation_repo=automation_repo,
         session=finished,
         threads=list(report.window_prs),
-        acu_cache={},
+        acu_cache=acu_cache,
     )
     report.posted_to = posted
     report.regression_filed = filed
     log.info("TESTING: %s finished: %s", session_id, report.verdict)
+    report.status_issue = post_run(
+        gh,
+        target_repo,
+        "testing",
+        [session_id],
+        f"TESTING: merge #{report.merge_index} verified: {report.verdict}",
+        {
+            "head_sha": head_sha,
+            "base_sha": base_sha,
+            "window": list(report.window_prs),
+            "verdict": report.verdict,
+            "regression_issue": (filed or {}).get("issue"),
+        },
+        testing_lines(
+            base_sha=base_sha,
+            head_sha=head_sha,
+            window_prs=list(report.window_prs),
+            merge_index=report.merge_index,
+            session=finished,
+            acus=session_acus(devin, finished, acu_cache),
+            regression_filed=filed,
+        ),
+    )
     return report

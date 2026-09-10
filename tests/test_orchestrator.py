@@ -784,7 +784,7 @@ def test_one_failed_verification_at_every_n_5_files_one_issue_and_one_fix(regist
     # but the failure is remediated exactly once
     filed = reduce_report.regression_filed
     assert filed["pr"] == 205 and filed["window"] == [201, 202, 203, 204, 205]
-    new_issues = set(gh.issues) - issues_before
+    new_issues = set(gh.issues) - issues_before - {reduce_report.status_issue}
     assert new_issues == {filed["issue"]}
     fixes = [s for s in devin.sessions.values() if "sda-regression" in s["tags"]]
     assert fixes == []
@@ -799,7 +799,7 @@ def test_one_failed_verification_at_every_n_5_files_one_issue_and_one_fix(regist
     ledger = IssueLedger(gh, REPO)
     assert find(ledger.read(205), "regression_filed", session_id=reduce_report.session_id)
     assert len([s for s in devin.sessions.values() if "sda-regression" in s["tags"]]) == 1
-    assert set(gh.issues) - issues_before == new_issues
+    assert set(gh.issues) - issues_before - {reduce_report.status_issue} == new_issues
 
 
 def test_a_regression_chain_stops_after_two_automated_attempts(registry, world):
@@ -905,3 +905,51 @@ def test_collect_requires_base_failure_for_closed_issues_only(tmp_path):
     rows[0]["exit_code"] = 2
     assert build_results(rows, closed={5}, regression=set())[0]["acceptance_met"] is False
     assert build_results(rows[:1], closed={5}, regression=set())[0]["base_exit_code"] is None
+
+
+def test_testing_run_is_logged_once_on_the_status_issue(registry, world):
+    devin, gh = world
+    report, _ = fail_verification_at_every_n_5(devin, gh, registry)
+    status = report.status_issue
+    assert status is not None and {lb["name"] for lb in gh.issues[status]["labels"]} == {"sda-status"}
+    runs = find(IssueLedger(gh, REPO).read(status), "run_reported", stage="testing")
+    assert len(runs) == 1
+    assert runs[0].data["head_sha"] == report.merge_commit_sha
+    assert runs[0].data["window"] == [201, 202, 203, 204, 205]
+    assert runs[0].data["regression_issue"] == report.regression_filed["issue"]
+    body = gh.comments[status][-1]["body"]
+    assert report.session_id in body and "base exit" in body and "regression issue" in body
+
+    # replaying the same merge event appends nothing
+    ev = merge_event(gh, 205, branch="main", sha=f"{5:040x}")
+    verify_and_wait(devin, gh, registry, ev, branch="main", every_n=5)
+    assert len(find(IssueLedger(gh, REPO).read(status), "run_reported", stage="testing")) == 1
+
+
+def test_autopr_run_is_logged_on_the_status_issue_with_pr_and_acus(registry, world):
+    devin, gh = world
+    report, _ = fail_verification_at_every_n_5(devin, gh, registry)
+    issue = report.regression_filed["issue"]
+
+    def finish(_seconds):
+        for sid, s in devin.sessions.items():
+            if f"issue-{issue}" in s["tags"] and s["structured_output"] is None:
+                devin.advance(sid, outcome="ok", pr_url=f"https://github.com/{REPO}/pull/900", acus=2.5)
+
+    autopr = run_autopr(
+        devin=devin,
+        gh=gh,
+        registry=registry,
+        target_repo=REPO,
+        automation_repo=AUTO,
+        ready_label="ready",
+        event=issue_event(gh.get_issue(REPO, issue), REPO),
+        wait=True,
+        sleep=finish,
+    )
+    status = report.status_issue
+    assert status is not None and autopr.status_issue == status
+    runs = find(IssueLedger(gh, REPO).read(status), "run_reported", stage="autopr")
+    assert len(runs) == 1 and runs[0].data["finished"][0]["pr_url"].endswith("/pull/900")
+    body = gh.comments[status][-1]["body"]
+    assert "pull/900" in body and "ACU" in body

@@ -24,6 +24,7 @@ from .registry import Registry
 from .regression import FIX_TAG, REGRESSION_LABEL, regression_record, start_regression_fix
 from .schema import FIX_SCHEMA
 from .sessions import holds_slot, wait_until_finished
+from .status import autopr_lines, post_run
 from .triage import Decision, Triage, classify
 
 log = logging.getLogger(__name__)
@@ -41,6 +42,7 @@ class AutoprReport:
     deflected: list[dict[str, Any]] = field(default_factory=list)
     skipped_in_flight: list[dict[str, Any]] = field(default_factory=list)
     finished: list[dict[str, Any]] = field(default_factory=list)
+    status_issue: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return self.__dict__.copy()
@@ -48,11 +50,13 @@ class AutoprReport:
 
 def publish_fixes(
     devin: DevinClient,
+    gh: GitHubClient,
+    target_repo: str,
     ledger: IssueLedger,
     report: AutoprReport,
     sleep: Callable[[float], None],
 ) -> None:
-    """Wait for every session this run started, then put each verdict on its issue."""
+    """Wait for every session this run started, put each verdict on its issue, then log the run."""
     acu_cache: dict[str, float] = {}
     for started in report.started:
         session = wait_until_finished(devin, str(started["session_id"]), sleep)
@@ -73,6 +77,16 @@ def publish_fixes(
             }
         )
         log.info("AUTOPR: %s finished: %s", started["session_id"], report.finished[-1]["verdict"])
+    verdicts = ", ".join(f"#{row['issue']} {row['verdict']}" for row in report.finished) or "nothing started"
+    report.status_issue = post_run(
+        gh,
+        target_repo,
+        "autopr",
+        [str(row["session_id"]) for row in report.finished],
+        f"AUTOPR ({report.trigger}): {verdicts}",
+        {"trigger": report.trigger, "finished": report.finished},
+        autopr_lines(report.trigger, report.finished, len(report.deflected), len(report.skipped_in_flight)),
+    )
 
 
 def extract_regression_issue(event: dict[str, Any]) -> dict[str, Any]:
@@ -129,7 +143,7 @@ def run_autopr_for_issue(
     )
     report.started.append(started)
     if wait:
-        publish_fixes(devin, ledger, report, sleep)
+        publish_fixes(devin, gh, target_repo, ledger, report, sleep)
     return report
 
 
@@ -245,5 +259,5 @@ def run_autopr(
         report.started.append({"issue": number, "session_id": session_id})
         log.info("AUTOPR: #%d -> session %s", number, session_id)
     if wait:
-        publish_fixes(devin, ledger, report, sleep)
+        publish_fixes(devin, gh, target_repo, ledger, report, sleep)
     return report
