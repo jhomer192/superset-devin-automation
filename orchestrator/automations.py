@@ -90,7 +90,7 @@ def reduce_payload(
     target_repo: str,
     automation_repo: str,
     verify_branch: str = "master",
-    every_n: int = 1,
+    every_n: int = 5,
     playbook_id_verify: str | None = None,
 ) -> dict[str, Any]:
     prompt = (
@@ -230,7 +230,7 @@ def register(
     automation_repo: str,
     *,
     verify_branch: str = "master",
-    every_n: int = 1,
+    every_n: int = 5,
     playbook_id_fix: str | None = None,
     playbook_id_verify: str | None = None,
     digest_issue: int | None = None,

@@ -56,7 +56,7 @@ def _first(env: Mapping[str, str], *names: str) -> str:
 
 def load_settings(simulate: bool = False) -> Settings:
     env = os.environ
-    every = int(env.get("VERIFY_EVERY_N_MERGES", "1") or 1)
+    every = int(env.get("VERIFY_EVERY_N_MERGES", "5") or 5)
     if every < 1:
         raise SystemExit("VERIFY_EVERY_N_MERGES must be >= 1")
     digest_issue = env.get("REPORT_DIGEST_ISSUE", "").strip()

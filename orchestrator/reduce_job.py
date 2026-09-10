@@ -27,6 +27,7 @@ from .sessions import holds_slot
 log = logging.getLogger(__name__)
 
 VERIFY_TAG = "sda-verify"
+TRIGGER_TAG_PREFIX = "trigger-pr-"
 
 
 class NotAMergedPR(ValueError):
@@ -97,7 +98,7 @@ def run_reduce(
     automation_repo: str,
     event: dict[str, Any],
     verify_branch: str = "master",
-    every_n: int = 1,
+    every_n: int = 5,
     playbook_id: str | None = None,
 ) -> ReduceReport:
     pr = extract_merged_pr(event)
@@ -188,7 +189,8 @@ def run_reduce(
         {
             "prompt": prompt,
             "title": f"Verify {target_repo} {verify_branch} @ {head_sha[:10]} (merge {k})",
-            "tags": [VERIFY_TAG] + [f"pr-{p}" for p in report.window_prs],
+            # `pr-<n>` threads receive the verdict; `trigger-pr-<n>` anchors the one remediation
+            "tags": [VERIFY_TAG, f"{TRIGGER_TAG_PREFIX}{number}"] + [f"pr-{p}" for p in report.window_prs],
             "structured_output_schema": VERIFICATION_SCHEMA,
             "structured_output_required": True,
             "resumable": True,
@@ -201,7 +203,13 @@ def run_reduce(
         "Regression verification session started",
         LedgerEntry(
             "verification_started",
-            data={"key": key, "session_id": session_id, "head": head_sha, "base": base_sha},
+            data={
+                "key": key,
+                "session_id": session_id,
+                "head": head_sha,
+                "base": base_sha,
+                "window": list(report.window_prs),
+            },
         ),
         [
             f"session: `{session_id}`" + (f" ({session['url']})" if session.get("url") else ""),

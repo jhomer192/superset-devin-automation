@@ -191,7 +191,6 @@ def collect(
     deflections: int,
     days: int = 30,
     now: datetime | None = None,
-    with_consumption: bool = True,
     acu_usd: float | None = None,
     sessions: list[dict[str, Any]] | None = None,
     consumption: dict[str, float] | None = None,
@@ -216,15 +215,14 @@ def collect(
         origins="automation", tags=[REPORT_TAG], created_after=after, created_before=before
     )
     acus = dict(consumption or {})
-    if with_consumption:
-        for s in sessions:
-            sid = str(s.get("session_id"))
-            if sid in acus:
-                continue
-            try:
-                acus[sid] = float(devin.session_consumption(sid).get("total_acus") or 0.0)
-            except Exception as exc:  # noqa: BLE001 - one bad session must not sink the report
-                log.warning("consumption lookup failed for %s: %s", sid, exc)
+    for s in sessions:
+        sid = str(s.get("session_id"))
+        if sid in acus:
+            continue
+        try:
+            acus[sid] = float(devin.session_consumption(sid).get("total_acus") or 0.0)
+        except Exception as exc:  # noqa: BLE001 - one bad session must not sink the report
+            log.warning("consumption lookup failed for %s: %s", sid, exc)
     return compute(
         sessions,
         org_metrics,

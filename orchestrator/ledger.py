@@ -18,7 +18,6 @@ from typing import Any
 from .github_api import GitHubClient
 
 MARKER_RE = re.compile(r"<!--\s*sda:(\{.*?\})\s*-->", re.DOTALL)
-MARKER_VERSION = 1
 
 
 @dataclass
@@ -26,7 +25,6 @@ class LedgerEntry:
     event: str
     at: str = field(default_factory=lambda: datetime.now(UTC).isoformat(timespec="seconds"))
     data: dict[str, Any] = field(default_factory=dict)
-    v: int = MARKER_VERSION
 
     def marker(self) -> str:
         return f"<!-- sda:{json.dumps(asdict(self), sort_keys=True, separators=(',', ':'))} -->"
@@ -47,7 +45,6 @@ def parse_entries(comments: list[dict[str, Any]]) -> list[LedgerEntry]:
                     event=str(raw["event"]),
                     at=str(raw.get("at", "")),
                     data=dict(raw.get("data") or {}),
-                    v=int(raw.get("v", 1)),
                 )
             )
     return entries

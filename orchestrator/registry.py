@@ -42,6 +42,7 @@ class IssueSpec:
 @dataclass(frozen=True)
 class Registry:
     repo: str
+    baseline_sha: str
     issues: tuple[IssueSpec, ...]
 
     def by_number(self, number: int) -> IssueSpec | None:
@@ -86,4 +87,8 @@ def load_registry(path: Path = REGISTRY_PATH) -> Registry:
                 triage_note=item.get("triage_note"),
             )
         )
-    return Registry(repo=raw["repo"], issues=tuple(sorted(issues, key=lambda i: i.number)))
+    return Registry(
+        repo=raw["repo"],
+        baseline_sha=raw["baseline_sha"],
+        issues=tuple(sorted(issues, key=lambda i: i.number)),
+    )
