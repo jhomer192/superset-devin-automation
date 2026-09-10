@@ -92,29 +92,6 @@ class FakeDevin:
         self.playbooks[playbook_id].update(body)
         return dict(self.playbooks[playbook_id])
 
-    def session_metrics(self, time_after: int, time_before: int) -> JSON:
-        sessions = list(self.sessions.values())
-        merged = [s for s in sessions if any(p.get("pr_state") == "merged" for p in s["pull_requests"])]
-        acus = [float(s["acus_consumed"]) for s in sessions]
-        return {
-            "sessions_created_count": len(sessions),
-            "sessions_with_merged_prs_count": len(merged),
-            "avg_acus_per_session": round(sum(acus) / len(acus), 3) if acus else 0.0,
-        }
-
-    def pr_metrics(self, time_after: int, time_before: int) -> JSON:
-        prs = [pr for s in self.sessions.values() for pr in s["pull_requests"]]
-        states = [p.get("pr_state") for p in prs]
-        return {
-            "prs_created_count": len(prs),
-            "prs_opened_count": states.count("open"),
-            "prs_merged_count": states.count("merged"),
-            "prs_closed_count": states.count("closed"),
-        }
-
-    def org_consumption(self, time_after: int, time_before: int) -> JSON:
-        return {"total_acus": round(sum(self.consumption.values()), 3), "consumption_by_date": []}
-
     def session_consumption(self, session_id: str) -> JSON:
         return {"session_id": session_id, "total_acus": self.consumption.get(session_id, 0.0)}
 
@@ -234,6 +211,17 @@ class FakeGitHub:
         self.branch_heads[branch] = sha
         self.pulls[number] = pr
         return dict(pr)
+
+    def open_pull(self, number: int, *, title: str, body: str) -> JSON:
+        self.pulls[number] = {
+            "number": number,
+            "html_url": f"https://github.com/jhomer192/superset/pull/{number}",
+            "title": title,
+            "body": body,
+            "state": "open",
+            "merged": False,
+        }
+        return dict(self.pulls[number])
 
     def list_issues(self, repo: str, labels: str, state: str = "open") -> list[JSON]:
         wanted = {lbl.strip() for lbl in labels.split(",") if lbl.strip()}

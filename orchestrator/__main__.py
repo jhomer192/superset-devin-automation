@@ -1,6 +1,6 @@
 """CLI: python -m orchestrator SUBCOMMAND [--simulate]
 
-Subcommands: testing, autopr, report, metrics, register, register-playbooks, simulate.
+Subcommands: testing, autopr, register, register-playbooks, simulate.
 """
 
 from __future__ import annotations
@@ -14,14 +14,12 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from . import automations, metrics, playbooks
+from . import automations, playbooks
 from .autopr_job import run_autopr
 from .config import Settings, load_settings
 from .devin_api import DevinClient, LiveDevinClient
 from .github_api import GitHubClient, LiveGitHubClient
-from .ledger import IssueLedger, find
 from .registry import Registry, load_registry
-from .report_job import run_report
 from .simulate import FakeDevin, FakeGitHub, issue_event, load_event, pr_number
 from .testing_job import run_testing
 
@@ -38,11 +36,6 @@ def _clients(settings: Settings) -> tuple[DevinClient, GitHubClient]:
     )
 
 
-def count_deflections(gh: GitHubClient, registry: Registry, repo: str) -> int:
-    ledger = IssueLedger(gh, repo)
-    return sum(len(find(ledger.read(spec.number), "triage_deflected")) for spec in registry.issues)
-
-
 def cmd_autopr(
     settings: Settings,
     devin: DevinClient,
@@ -50,10 +43,13 @@ def cmd_autopr(
     registry: Registry,
     event_json: Path | None = None,
     event: dict[str, Any] | None = None,
+    wait: bool = False,
+    sleep: Callable[[float], None] | None = None,
 ) -> dict[str, Any]:
     """With an issue event: the fix session for that regression issue. Without: the Friday sweep."""
     if event_json is not None and event is None:
         event = load_event(event_json)
+    kwargs: dict[str, Any] = {"sleep": sleep} if sleep is not None else {}
     return run_autopr(
         devin=devin,
         gh=gh,
@@ -63,6 +59,8 @@ def cmd_autopr(
         ready_label=settings.ready_label,
         playbook_id=settings.playbook_id_fix,
         event=event,
+        wait=wait,
+        **kwargs,
     ).as_dict()
 
 
@@ -95,33 +93,6 @@ def cmd_testing(
     ).as_dict()
 
 
-def cmd_metrics(
-    settings: Settings, devin: DevinClient, gh: GitHubClient, registry: Registry, days: int
-) -> dict[str, Any]:
-    return metrics.collect(
-        devin,
-        deflections=count_deflections(gh, registry, settings.target_repo),
-        days=days,
-        acu_usd=settings.acu_usd,
-    ).as_dict()
-
-
-def cmd_report(
-    settings: Settings, devin: DevinClient, gh: GitHubClient, registry: Registry, days: int
-) -> dict[str, Any]:
-    return run_report(
-        devin=devin,
-        gh=gh,
-        target_repo=settings.target_repo,
-        automation_repo=settings.automation_repo,
-        deflections=lambda: count_deflections(gh, registry, settings.target_repo),
-        days=days,
-        digest_issue=settings.report_digest_issue,
-        digest_every_hours=settings.report_digest_every_hours,
-        acu_usd=settings.acu_usd,
-    ).as_dict()
-
-
 def cmd_register(settings: Settings, devin: DevinClient, dry_run: bool) -> list[dict[str, Any]]:
     return automations.register(
         devin,
@@ -131,8 +102,6 @@ def cmd_register(settings: Settings, devin: DevinClient, dry_run: bool) -> list[
         every_n=settings.verify_every_n_merges,
         playbook_id_fix=settings.playbook_id_fix,
         playbook_id_verify=settings.playbook_id_verify,
-        digest_issue=settings.report_digest_issue,
-        digest_every_hours=settings.report_digest_every_hours,
         dry_run=dry_run,
     )
 
@@ -145,34 +114,37 @@ def cmd_register_playbooks(devin: DevinClient, dry_run: bool) -> dict[str, Any]:
 
 def cmd_simulate(settings: Settings, registry: Registry) -> dict[str, Any]:
     """The whole chain, offline: Friday AUTOPR sweep, a fix landing, TESTING on the merges, a failed
-    verification filing a regression issue, that issue's event starting AUTOPR, REPORT, metrics.
+    verification filing a regression issue, that issue's event starting AUTOPR.
 
     Everything printed here is produced by the same code paths the live automations run; only
-    the Devin and GitHub clients are in-memory doubles, and the fake verification session
-    "finishes" while TESTING is waiting on it.
+    the Devin and GitHub clients are in-memory doubles, and the fake sessions "finish" while
+    TESTING and AUTOPR are waiting on them.
     """
     devin, gh = FakeDevin(), FakeGitHub.from_fixtures()
     out: dict[str, Any] = {}
 
-    out["friday_1_autopr_sweep"] = cmd_autopr(settings, devin, gh, registry)
-    out["friday_1_autopr_rerun_is_idempotent"] = cmd_autopr(settings, devin, gh, registry)
-
-    # Sessions finish: one lands a PR that closes #5, one errors, one is suspended awaiting a human.
-    started = out["friday_1_autopr_sweep"]["started"]
-    by_issue = {s["issue"]: s["session_id"] for s in started}
     event = load_event()
     pr = event["pull_request"]
-    if 5 in by_issue:
-        devin.advance(by_issue[5], outcome="ok", acus=3.2, pr_url=pr["html_url"])
-        gh.pulls[int(pr["number"])] = pr
-        gh.close_completed(5)
-    for issue, sid in by_issue.items():
-        if issue == 5:
-            continue
-        if issue % 2 == 0:
-            devin.advance(sid, outcome="error", acus=0.4)
-        else:
-            devin.suspend(sid, "waiting_for_user")
+
+    def finish_fixes(_seconds: float) -> None:
+        """Stand-in for time.sleep inside AUTOPR's wait. The fix for #5 lands a PR, the other
+        Friday fixes error out, and a regression fix opens a PR that closes its issue."""
+        for sid, session in list(devin.sessions.items()):
+            if "sda-fix" not in session["tags"] or session["structured_output"] is not None:
+                continue
+            issue = next(int(t[6:]) for t in session["tags"] if t.startswith("issue-"))
+            if issue == 5:
+                devin.advance(sid, outcome="ok", acus=3.2, pr_url=pr["html_url"])
+                gh.pulls[int(pr["number"])] = pr
+                gh.close_completed(5)
+            elif registry.by_number(issue) is not None:
+                devin.advance(sid, outcome="error", acus=0.4)
+            else:
+                fix_pr = gh.open_pull(960, title=f"fix: regression from #{issue}", body=f"Closes #{issue}")
+                devin.advance(sid, outcome="ok", acus=4.5, pr_url=fix_pr["html_url"])
+
+    out["friday_1_autopr_sweep"] = cmd_autopr(settings, devin, gh, registry, wait=True, sleep=finish_fixes)
+    out["friday_1_autopr_rerun_retries_only_the_errored"] = cmd_autopr(settings, devin, gh, registry)
 
     def finish_verification(outcome: str) -> Callable[[float], None]:
         """Stand-in for time.sleep inside TESTING's wait: the pending verification finishes."""
@@ -211,12 +183,6 @@ def cmd_simulate(settings: Settings, registry: Registry) -> dict[str, Any]:
     verify_sid = out["merge_testing"]["session_id"]
     out["verification_structured_output"] = devin.get_session(verify_sid)["structured_output"]
 
-    # REPORT publishes the finished fix sessions; the verification is already on its PRs. #1 stands
-    # in for the digest tracking issue.
-    reporting = replace(settings, report_digest_issue=1)
-    out["report"] = cmd_report(reporting, devin, gh, registry, days=30)
-    out["report_rerun_is_idempotent"] = cmd_report(reporting, devin, gh, registry, days=30)
-
     # A later merge regresses: TESTING files the labelled issue, the label event starts AUTOPR.
     # The fillers put the regressing merge on a window boundary whatever the cadence is.
     for i in range(1, n):
@@ -229,7 +195,9 @@ def cmd_simulate(settings: Settings, registry: Registry) -> dict[str, Any]:
     )
     regression_issue = out["regressing_merge_testing"]["regression_filed"]["issue"]
     labelled = issue_event(gh.get_issue(settings.target_repo, regression_issue), settings.target_repo)
-    out["regression_issue_event_autopr"] = cmd_autopr(settings, devin, gh, registry, event=labelled)
+    out["regression_issue_event_autopr"] = cmd_autopr(
+        settings, devin, gh, registry, event=labelled, wait=True, sleep=finish_fixes
+    )
     out["regression_issue_event_replay_is_deduplicated"] = cmd_autopr(
         settings, devin, gh, registry, event=labelled
     )
@@ -239,10 +207,7 @@ def cmd_simulate(settings: Settings, registry: Registry) -> dict[str, Any]:
     out["human_labelled_issue_starts_nothing"] = cmd_autopr(
         settings, devin, gh, registry, event=issue_event(human, settings.target_repo)
     )
-    out["report_after_regression_files_nothing_new"] = cmd_report(reporting, devin, gh, registry, days=30)
-
     out["friday_2_autopr_sweep"] = cmd_autopr(settings, devin, gh, registry)
-    out["metrics"] = cmd_metrics(settings, devin, gh, registry, days=30)
     out["automations_dry_run"] = [
         {"name": r["name"], "triggers": r["payload"]["triggers"]}
         for r in cmd_register(settings, devin, dry_run=True)
@@ -280,16 +245,15 @@ def main(argv: list[str] | None = None) -> int:
         "autopr", help="issue event: fix session for that regression issue; no event: Friday sweep"
     )
     p_autopr.add_argument("--event-json", type=Path, default=None)
+    p_autopr.add_argument(
+        "--wait", action="store_true", help="block until the fix sessions finish, post each verdict"
+    )
     p_testing = sub.add_parser("testing", help="merged-PR event: start one verification session")
     p_testing.add_argument("--event-json", type=Path, default=None)
     p_testing.add_argument(
         "--wait", action="store_true", help="block until the verdict, publish it, file the regression"
     )
-    p_report = sub.add_parser("report", help="publish finished session outcomes to GitHub")
-    p_report.add_argument("--days", type=int, default=30)
-    p_metrics = sub.add_parser("metrics", help="observability report")
-    p_metrics.add_argument("--days", type=int, default=30)
-    p_reg = sub.add_parser("register", help="create/update the TESTING, AUTOPR and REPORT automations")
+    p_reg = sub.add_parser("register", help="create/update the TESTING and AUTOPR automations")
     p_reg.add_argument("--dry-run", action="store_true")
     p_pb = sub.add_parser(
         "register-playbooks", help="create/update the remediation and verification playbooks"
@@ -313,13 +277,9 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(f"{args.command} without --dry-run needs live credentials")
         devin, gh = _clients(settings) if not (registering and args.dry_run) else (FakeDevin(), FakeGitHub())
         if args.command == "autopr":
-            result = cmd_autopr(settings, devin, gh, registry, args.event_json)
+            result = cmd_autopr(settings, devin, gh, registry, args.event_json, wait=args.wait)
         elif args.command == "testing":
             result = cmd_testing(settings, devin, gh, registry, args.event_json, wait=args.wait)
-        elif args.command == "report":
-            result = cmd_report(settings, devin, gh, registry, args.days)
-        elif args.command == "metrics":
-            result = cmd_metrics(settings, devin, gh, registry, args.days)
         elif args.command == "register-playbooks":
             result = cmd_register_playbooks(devin, args.dry_run)
         else:

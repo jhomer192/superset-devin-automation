@@ -27,12 +27,11 @@ from .prompts import verification_prompt
 from .publish import TRIGGER_TAG_PREFIX, publish_verification, verdict
 from .registry import Probe, Registry
 from .schema import VERIFICATION_SCHEMA
-from .sessions import holds_slot, is_finished
+from .sessions import holds_slot, wait_until_finished
 
 log = logging.getLogger(__name__)
 
 VERIFY_TAG = "sda-verify"
-POLL_SECONDS = 60
 
 
 class NotAMergedPR(ValueError):
@@ -95,22 +94,6 @@ def regression_issue_numbers(
         if issue.get("state") == "closed" and issue.get("state_reason") == "completed":
             out.append(spec.number)
     return out
-
-
-def wait_for_verdict(
-    devin: DevinClient, session_id: str, sleep: Callable[[float], None] = time.sleep
-) -> dict[str, Any]:
-    """Poll until the session is finished. No deadline: a verification takes as long as building
-    and booting Superset twice takes, and a session that is waiting on a human holds the slot
-    until that human acts."""
-    while True:
-        session = devin.get_session(session_id)
-        if is_finished(session.get("status"), session.get("status_detail")):
-            return session
-        log.info(
-            "TESTING: %s is %s/%s, waiting", session_id, session.get("status"), session.get("status_detail")
-        )
-        sleep(POLL_SECONDS)
 
 
 def run_testing(
@@ -250,7 +233,7 @@ def run_testing(
     if not wait:
         return report
 
-    finished = wait_for_verdict(devin, session_id, sleep)
+    finished = wait_until_finished(devin, session_id, sleep)
     report.verdict = verdict(finished.get("structured_output"))
     posted, filed = publish_verification(
         devin=devin,

@@ -8,8 +8,8 @@ whose verdict is a probe exit code.
 The two halves run in different automations. TESTING files the issue with the `sda-regression`
 label and records what failed in a `regression_depth` ledger entry on the issue. GitHub's
 `github:issues` event for that label triggers AUTOPR, which reads the entry back and starts the
-one fix session. The filed issue is tagged into the fix session so REPORT publishes its outcome
-and the metrics count it with every other fix.
+one fix session. The filed issue is tagged into the fix session so AUTOPR can publish its outcome
+back onto the issue.
 
 A verification covers a window of merges but one failure is one piece of work: exactly one issue
 per failed verification, whatever the cadence. The issue names the PR whose merge triggered the

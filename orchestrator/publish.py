@@ -1,8 +1,8 @@
 """Publish a finished session's verdict onto GitHub, and turn a failed verification into work.
 
-Both TESTING (after waiting for the verification it started) and REPORT (sweeping up sessions
-whose TESTING run did not live to see them finish) call into here, so the comment a reviewer sees
-and the idempotency markers behind it are the same whichever stage wrote them.
+TESTING calls in after waiting for the verification it started; AUTOPR calls `post_outcome` after
+waiting for the fix session it started. The comment a reviewer sees and the idempotency markers
+behind it are the same for both stages.
 
 A `session_reported` marker keyed by session id on a thread means the verdict is already there. A
 failed verification files one regression issue for the whole window, keyed by the verification
@@ -87,7 +87,7 @@ def outcome_lines(session: dict[str, Any], acus: float | None) -> list[str]:
 
 
 def session_acus(devin: DevinClient, session: dict[str, Any], cache: dict[str, float]) -> float | None:
-    """ACUs for one session, cached so the digest does not re-bill the same lookup."""
+    """ACUs for one session, one consumption lookup per session per run."""
     session_id = str(session.get("session_id"))
     if session_id in cache:
         return cache[session_id]
@@ -202,8 +202,7 @@ def remediate(
         return None
     existing = existing_regression_issue(gh, target_repo, session_id)
     if existing is not None:
-        # a concurrent publisher (TESTING and REPORT can both see the same finished session) got
-        # there first; adopt its issue so the marker exists on the next read
+        # a replayed TESTING run got there first; adopt its issue so the marker exists next read
         ledger.append(
             pr_number,
             "Regression already filed",

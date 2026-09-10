@@ -1,9 +1,11 @@
-"""Build and register the three automations (TESTING, AUTOPR, REPORT) through the Automations API.
+"""Build and register the two automations (TESTING, AUTOPR) through the Automations API.
 
-The chain: a PR merges -> TESTING verifies every 5th merge, waits for the verdict and files an
-`sda-regression` issue on failure -> that issue's `github:issues` event fires AUTOPR, which starts
-the fix session -> its PR merges and re-enters TESTING. REPORT publishes fix-session verdicts and
-the metrics digest. Automations with the pre-rename names (MAP, REDUCE) are deleted on register.
+The chain: a PR merges -> TESTING verifies every 5th merge, waits for the verdict, posts it on
+every PR of the window and files an `sda-regression` issue on failure -> that issue's
+`github:issues` event fires AUTOPR, which starts the fix session, waits for it and posts its
+outcome on the issue -> the fix PR merges and re-enters TESTING. Each stage publishes its own
+telemetry; there is no sweeper. Automations under retired names (MAP, REDUCE, REPORT) are deleted
+on register.
 
 Every payload is validated locally against the request schemas vendored from
 https://docs.devin.ai/v3-openapi.yaml (orchestrator/v3_schemas.json) before anything is sent.
@@ -13,7 +15,7 @@ Design constraints honoured here (see AutomationCreateRequest in the spec):
 * run_as = {"type": "organization"} on all of them
 * no limits.max_acu_limit, no concurrency caps, no timeouts
 * net_policy allows the git proxy, GitHub, the Devin API and PyPI; the shim needs nothing else
-* prompts are thin shims: clone this repo, run `python -m orchestrator <autopr|testing|report>`
+* prompts are thin shims: clone this repo, run `python -m orchestrator <autopr|testing> --wait`
 """
 
 from __future__ import annotations
@@ -29,13 +31,12 @@ from .regression import REGRESSION_LABEL
 
 SCHEMAS_PATH = Path(__file__).with_name("v3_schemas.json")
 FRIDAY_RRULE = "FREQ=WEEKLY;BYDAY=FR"
-HOURLY_RRULE = "FREQ=HOURLY"
 AUTOPR_NAME = "superset-devin-automation: AUTOPR (fix session per regression issue + Friday sweep)"
 TESTING_NAME = "superset-devin-automation: TESTING (verify every 5th merge, file regressions)"
-REPORT_NAME = "superset-devin-automation: REPORT (publish session outcomes)"
 RETIRED_NAMES = (
     "superset-devin-automation: MAP (Friday ready-issue sweep)",
     "superset-devin-automation: REDUCE (verify merged PR)",
+    "superset-devin-automation: REPORT (publish session outcomes)",
 )
 NET_POLICY = {
     "allow": [
@@ -83,13 +84,15 @@ def autopr_payload(
         _shim(
             automation_repo,
             _env_prefix("PLAYBOOK_ID_FIX", playbook_id_fix)
-            + "python -m orchestrator autopr --event-json event.json  "
+            + "python -m orchestrator autopr --wait --event-json event.json  "
             "(if the triggering event is a github:issues payload, first write it to event.json unmodified; "
             "if the trigger is the schedule, run without --event-json)",
         )
         + f"\nTarget repository for issues: @{target_repo}\n"
         + f"An issue event means TESTING filed a `{REGRESSION_LABEL}` issue: the command starts the one fix "
-        "session for that issue. The Friday schedule triages every open `ready` issue instead.\n"
+        "session for that issue. The Friday schedule triages every open `ready` issue instead. Either "
+        "way the command waits for the fix sessions and posts each outcome on its issue; it can run for "
+        "hours, keep waiting.\n"
     )
     return {
         "name": AUTOPR_NAME,
@@ -194,52 +197,6 @@ def testing_payload(
     }
 
 
-def report_payload(
-    target_repo: str,
-    automation_repo: str,
-    digest_issue: int | None = None,
-    digest_every_hours: int = 24,
-) -> dict[str, Any]:
-    digest_env = f"REPORT_DIGEST_ISSUE={digest_issue} " if digest_issue is not None else ""
-    prompt = (
-        _shim(
-            automation_repo,
-            f"{digest_env}REPORT_DIGEST_EVERY_HOURS={digest_every_hours} python -m orchestrator report",
-        )
-        + f"\nTarget repository: @{target_repo}\n"
-        + "The command publishes the outcome of every finished fix session to its issue, sweeps up "
-        "verification sessions whose TESTING run did not publish them, and appends the metrics digest; "
-        "sessions already reported are skipped.\n"
-    )
-    return {
-        "name": REPORT_NAME,
-        "enabled": True,
-        "run_as": {"type": "organization"},
-        "metadata": {
-            "component": "report",
-            "target_repo": target_repo,
-            "digest_issue": str(digest_issue) if digest_issue is not None else "",
-            "digest_every_hours": str(digest_every_hours),
-        },
-        "triggers": [
-            {
-                "event_type": "schedule:recurring",
-                "conditions": {
-                    "any": [{"all": [{"field": "rrule", "operator": "recurrence", "value": HOURLY_RRULE}]}]
-                },
-            }
-        ],
-        "actions": [
-            {
-                "type": "start_session",
-                "prompt": prompt,
-                "session": {"tags": ["sda-report"]},
-            }
-        ],
-        "session_settings": {"net_policy": NET_POLICY},
-    }
-
-
 def _validator(schema_name: str) -> Draft202012Validator:
     """OpenAPI components use ``#/components/schemas/X`` refs, so validate through a root
     document that carries the vendored components and points at the requested schema."""
@@ -282,8 +239,6 @@ def register(
     every_n: int = 5,
     playbook_id_fix: str | None = None,
     playbook_id_verify: str | None = None,
-    digest_issue: int | None = None,
-    digest_every_hours: int = 24,
     dry_run: bool = False,
 ) -> list[dict[str, Any]]:
     """Create the automations, or update them in place if ones with the same name exist.
@@ -296,7 +251,6 @@ def register(
     payloads = (
         testing_payload(target_repo, automation_repo, verify_branch, every_n, playbook_id_verify),
         autopr_payload(target_repo, automation_repo, playbook_id_fix),
-        report_payload(target_repo, automation_repo, digest_issue, digest_every_hours),
     )
     for payload in payloads:
         errors = validate_payload(payload)

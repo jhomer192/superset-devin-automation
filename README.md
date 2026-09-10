@@ -4,7 +4,7 @@ An event-driven remediation and regression-verification loop for
 [jhomer192/superset](https://github.com/jhomer192/superset), driven by the
 [Devin v3 API](https://docs.devin.ai/v3-openapi.yaml).
 
-Three Devin Automations form one chain. All are thin shims: the session they start clones this
+Two Devin Automations form one chain. All are thin shims: the session they start clones this
 repo and runs `python -m orchestrator ...`. Every decision — which issue gets a session, whether a
 merged PR gets verified, whether the fix worked — is made by code in this repository and is
 covered by `tests/`.
@@ -23,16 +23,16 @@ PR merges into master ──► TESTING (every 5th merge): verification session,
 | Name | Trigger | What the orchestrator does |
 |------|---------|----------------------------|
 | **TESTING** — `superset-devin-automation: TESTING (verify every 5th merge, file regressions)` | `github:pull_request` with `action == "closed"`, `pull_request.merged == true`, `repository.full_name == "jhomer192/superset"` | `python -m orchestrator testing --wait --event-json <path>`: count the merge; on every *n*th start **one** verification session that clones Superset, stands up Postgres, builds the frontend, boots the app, runs the committed probes at HEAD *and* at BASE; wait for it; post the verdict on every PR in the window; on failure file **one** `sda-regression` issue. |
-| **AUTOPR** — `superset-devin-automation: AUTOPR (fix session per regression issue + Friday sweep)` | `github:issues` with `action == "labeled"`, `label.name == "sda-regression"`, `repository.full_name == "jhomer192/superset"`; and `schedule:recurring` `FREQ=WEEKLY;BYDAY=FR` | `python -m orchestrator autopr --event-json <path>`: for the issue event, start **one** fix session for that issue if TESTING's `regression_depth` record is on it (an issue a human labelled starts nothing). On the Friday schedule, triage every open `ready` issue and start at most one fix session per eligible issue. |
-| **REPORT** — `superset-devin-automation: REPORT (publish session outcomes)` | `schedule:recurring`, `FREQ=HOURLY` | `python -m orchestrator report`: publish the verdict of every finished fix session onto its issue, sweep verification sessions whose TESTING run did not publish them, and append a metrics digest to the tracking issue at most once per `REPORT_DIGEST_EVERY_HOURS`. |
+| **AUTOPR** — `superset-devin-automation: AUTOPR (fix session per regression issue + Friday sweep)` | `github:issues` with `action == "labeled"`, `label.name == "sda-regression"`, `repository.full_name == "jhomer192/superset"`; and `schedule:recurring` `FREQ=WEEKLY;BYDAY=FR` | `python -m orchestrator autopr --wait --event-json <path>`: for the issue event, start **one** fix session for that issue if TESTING's `regression_depth` record is on it (an issue a human labelled starts nothing). On the Friday schedule, triage every open `ready` issue and start at most one fix session per eligible issue. Either way, wait for every session it started and post its verdict, PR and ACUs on the issue. |
 
 The issue event is the hand-off between the two stages. There is no polling between them and no
 custom webhook receiver: GitHub delivers `github:issues` to the Devin app, and the trigger's
 `label.name == "sda-regression"` condition is what keeps AUTOPR from firing on any other issue.
-`register` deletes automations still registered under the pre-rename names (MAP, REDUCE).
+Each stage publishes its own outcome before it exits, so there is no sweeper and no digest job.
+`register` deletes automations still registered under retired names (MAP, REDUCE, REPORT).
 
 The automations are created with `run_as: {"type": "organization"}` and a network policy
-allowing `git-manager.devin.ai`. The exact payloads are built in
+allowing `git-manager.devin.ai`, `github.com`, `api.github.com`, `api.devin.ai` and `pypi.org`. The exact payloads are built in
 `orchestrator/automations.py` and validated against the OpenAPI components vendored in
 `orchestrator/v3_schemas.json` before anything is sent.
 
@@ -71,22 +71,22 @@ pip install -e . && python -m orchestrator simulate
 
 1. **Friday 1, AUTOPR sweep** — 9 `ready` issues scanned; #12 and #15 (dependency refreshes)
    are deflected at zero ACU with a logged reason; 7 fix sessions start.
-2. **Friday 1, sweep rerun** — nothing starts: every issue already has a live session.
-3. **A fix session finishes** with structured output and PR #14 merges as the 5th merge →
+   AUTOPR waits for all seven: #5's lands PR #14 and its verdict, PR and ACUs are posted on #5;
+   the other six error out and get their error comment.
+2. **Friday 1, sweep rerun** — the errored issues are retried; #5 is closed and starts nothing.
+3. **PR #14 merges** as the 5th merge →
    **TESTING** starts one verification session, waits for it (the fake finishes while TESTING
    sleeps), and posts the verdict, probe exit codes and ACUs onto all five PRs of the window;
    replaying the same webhook is deduplicated on `(pr_url, merge_commit_sha)`.
-4. **REPORT** posts each finished fix session's verdict onto its issue and the digest; a second
-   run posts nothing.
-5. **A later 5th merge fails verification** → TESTING files one issue labelled `sda-regression`
+4. **A later 5th merge fails verification** → TESTING files one issue labelled `sda-regression`
    with the window, SHAs and failing probes. The fake `github:issues` event for that issue runs
-   **AUTOPR**, which starts exactly one fix session; replaying the event starts nothing, and an
-   issue a human created with the same label starts nothing (no `regression_depth` record).
-6. **Friday 2, sweep** — sessions still waiting for a human keep their slot; a dead session's
-   issue is retried; the merged issue is gone from the `ready` list.
-7. **Metrics** are computed over the fake sessions, and the automation payloads are
-   dry-run validated.
-8. **Playbooks** are registered into the fake org twice (same two ids both times), and one more
+   **AUTOPR**, which starts exactly one fix session, waits for it, and posts the fix PR it opened
+   onto the issue; replaying the event finds that open PR and starts nothing, and an issue a human
+   created with the same label starts nothing (no `regression_depth` record).
+5. **Friday 2, sweep** — errored issues are retried; the merged issue is gone from the `ready`
+   list.
+6. The automation payloads are dry-run validated.
+7. **Playbooks** are registered into the fake org twice (same two ids both times), and one more
    sweep with those ids shows every fix prompt carrying the `@playbook:` token; the earlier steps
    ran with the ids unset, exercising the inline fallback.
 
@@ -102,12 +102,10 @@ docker compose run --rm orchestrator register-playbooks --dry-run   # print vali
 docker compose run --rm orchestrator register-playbooks   # create/update both playbooks; prints PLAYBOOK_ID_*
 # put the printed PLAYBOOK_ID_FIX / PLAYBOOK_ID_VERIFY in .env, then:
 docker compose run --rm orchestrator register --dry-run   # print validated automation payloads
-docker compose run --rm orchestrator register             # create/update the three automations (shims carry the ids)
+docker compose run --rm orchestrator register             # create/update both automations (shims carry the ids)
 docker compose run --rm orchestrator autopr               # what Friday would do, right now
-docker compose run --rm orchestrator autopr --event-json /events/issue.json   # one github:issues event
+docker compose run --rm orchestrator autopr --wait --event-json /events/issue.json   # one github:issues event
 docker compose run --rm orchestrator testing --wait --event-json /events/pr.json
-docker compose run --rm orchestrator report --days 30
-docker compose run --rm orchestrator metrics --days 30
 ```
 
 Inside a Devin session the same values are available as the org secret
@@ -150,6 +148,12 @@ On the Friday sweep, for every open issue labelled `ready`, in order:
    (`orchestrator/prompts.py`) that names the probe the session must make pass, requires it to
    fail at BASE first, and forbids editing the probe. No `max_acu_limit`, no timeout, no turn
    cap anywhere; `tests/test_orchestrator.py` asserts their absence.
+
+With `--wait` (the registered shim always passes it) the command then polls each session it
+started every 60 s until it reaches a terminal state and posts one `session_reported` comment on
+the issue: verdict (`acceptance_met`, or the `error_message`), the PR URL, ACUs from
+`GET /consumption/daily/sessions/{id}` and the session URL. A session parked on a human
+(`suspended`/`waiting_for_user`) is waited on, not abandoned.
 
 Progress is an append-only comment log on the issue (`orchestrator/ledger.py`,
 `<!-- sda:{json} -->` markers) because GitHub has no conditional write for issue bodies.
@@ -202,9 +206,8 @@ With `--wait` (the registered shim always passes it) the command then polls
 `GET /sessions/{id}` every 60 s until the verification reaches a terminal state, with no
 deadline, and publishes through `orchestrator/publish.py`: a `session_reported` comment with the
 verdict, per-probe BASE/HEAD exit codes, ACUs and session URL on every PR of the window, and on
-`acceptance_met == false` the regression issue (see Self-healing). The same code runs from
-REPORT for a verification whose TESTING session did not live to publish it, keyed on the same
-markers, so nothing is posted twice.
+`acceptance_met == false` the regression issue (see Self-healing). Every comment is keyed by
+session id in its marker, so a replayed event posts nothing twice.
 
 ## Probes
 
@@ -241,63 +244,33 @@ Every v3 endpoint this loop calls, all under `/v3/organizations/{org_id}` (`orch
 | `POST /sessions`, `GET /sessions/{id}`, `GET /sessions` | start fix/verification sessions, dedup on live sessions |
 | `GET /automations`, `POST /automations`, `PATCH /automations/{id}`, `DELETE /automations/{id}` | `register` (idempotent by name; deletes the retired MAP/REDUCE registrations) |
 | `GET /playbooks`, `POST /playbooks`, `PUT /playbooks/{id}` | `register-playbooks` (idempotent by title); payload is `PlaybookCreateRequest` |
-| `GET /metrics/sessions`, `GET /metrics/prs`, `GET /consumption/daily/sessions/{id}` | `metrics` |
+| `GET /consumption/daily/sessions/{id}` | ACUs on every verdict comment |
 
 ## Observability
 
-`python -m orchestrator metrics --days N` (`orchestrator/metrics.py`) queries
-`GET /metrics/sessions` (`time_after`/`time_before`), `GET /sessions` filtered to
-`origin=automation`, and
-`GET /consumption/daily/sessions/{session_id}` for each automation session, then reports:
-
-| number | meaning | limitation |
-|--------|---------|------------|
-| `org_metrics.sessions_created_count`, `sessions_with_merged_prs_count`, `avg_acus_per_session` | Devin's own aggregates for the window | organization-wide, not only this loop |
-| `fix_sessions`, `verify_sessions` | automation sessions tagged `sda-fix` / `sda-verify` in the window | tags are set by this orchestrator only |
-| `merge_rate` | fix sessions whose `pull_requests[]` has `pr_state == merged` ÷ fix sessions | a PR merged after the window closes is counted next run |
-| `acu_per_merged_pr` | **all** automation ACUs (fix + verify + errored) ÷ merged PRs | cost of outcome, not cost per PR |
-| `verification_pass_rate` | verification sessions with `acceptance_met == true` ÷ verification sessions with a non-error output | sessions still running are excluded |
-| `triage_deflections` | `triage_deflected` ledger comments on the target repo's issues | needs `GITHUB_TOKEN`; 0 without it |
-| `liveness` | count per liveness bucket (live / awaiting_human / dead / terminal_suspended / unknown_suspended) | point-in-time |
-| `regression_issues`, `regression_fix_prs`, `regressions[]` | issues this loop filed off a failed verification, with the fix session, its status and the PR it produced | only issues filed by the loop itself |
-| `pr_metrics` | `GET /metrics/prs`: PRs Devin created / opened / merged / closed | organization-wide |
-| `total_acus`, `org_total_acus`, `estimated_cost_usd` | this loop's ACUs, the organization's ACUs from `GET /consumption/daily`, and money | the API prices nothing; USD appears only when `ACU_USD` is set |
-
-The report also carries a `limitations` list so a reader never has to infer them.
-
-Each stage also writes its own record where the work is:
+There is no dashboard job. Each stage writes its record where the work is, in the same run that
+did the work, so an engineering leader reads the PR or issue and sees what happened to it:
 
 | stage | where | ledger entries (`<!-- sda:{json} -->`) and what they answer |
 |-------|-------|-------------------------------------------------------------|
-| TESTING | every PR merged into `VERIFY_BRANCH` | `merge_counted` (position k of n: did the merge count?); `verification_started` (session id, HEAD, BASE, window: what is being verified?); `session_reported` (verdict, probe exit codes, ACUs: did it pass?); `regression_filed` / `regression_escalated` (issue number, depth: what happened to a failure?) |
-| AUTOPR | the regression issue / each `ready` issue | `regression_depth` (chain depth, PR, window, probes: why does this issue exist?); `session_started` with `trigger: github:issues` or `sweep` (which session, started by what?); `triage_deflected` (why nothing started) |
-| REPORT | the issue | `session_reported` for fix sessions (verdict, PR URL, ACUs) |
+| TESTING | every PR merged into `VERIFY_BRANCH` | `merge_counted` (position k of n: did the merge count?); `verification_started` (session id, HEAD, BASE, window: what is being verified?); `session_reported` (verdict, per-probe BASE/HEAD exit codes, ACUs, session URL: did it pass, what did it cost?); `regression_filed` / `regression_escalated` (issue number, depth: what happened to a failure?) |
+| AUTOPR | the regression issue / each `ready` issue | `regression_depth` (chain depth, PR, window, probes: why does this issue exist?); `session_started` with `trigger: github:issues` or `sweep` (which session, started by what?); `session_reported` (verdict, PR URL, ACUs, session URL: did the fix land, what did it cost?); `triage_deflected` (why nothing started) |
 
-The command's own JSON output (`TestingReport`, `AutoprReport`, `ReportReport`) is what the
-automation session prints, so the invocation list on the automation page shows the same
-decisions: `merge_index`, `skipped_reason`, `verdict`, `posted_to`, `regression_filed`,
-`started`, `skipped_in_flight`.
+Reading across threads: the count of `session_reported` fix comments whose PR merged over the
+`session_started` comments is the remediation success rate; `merge_counted` positions are the
+merge throughput; `verification_started` to `session_reported` on the same PR is verification
+latency; `regression_filed` without a later merged fix PR is the open regression backlog.
 
-The **REPORT** automation (`orchestrator/report_job.py`) runs hourly for the sessions nobody is
-waiting on. For each `sda-fix` session that has reached a terminal state it appends one ledger
-comment to its issue — verdict (`acceptance_met`, or the `error_message`), the PR, ACUs from
-`GET /consumption/daily/sessions/{id}`, and the session URL — sweeps `sda-verify` sessions that
-TESTING did not publish, and every `REPORT_DIGEST_EVERY_HOURS` appends the metrics table above to
-`REPORT_DIGEST_ISSUE` (live: https://github.com/jhomer192/superset/issues/22). Sessions still
-running or waiting for a human are left alone until they finish, and a `session_reported` marker
-already on the thread means the run skips that session, so the automation is safe to run as often
-as you like. Polling is the mechanism because automations have no completion callback — the same
-constraint that makes the TESTING cadence counter derived rather than stored.
+The command's own JSON output (`TestingReport`, `AutoprReport`) is what the automation session
+prints, so the invocation list on the automation page shows the same decisions: `merge_index`,
+`skipped_reason`, `verdict`, `posted_to`, `regression_filed`, `started`, `skipped_in_flight`,
+`finished` (session id, status, verdict, PR URL, ACUs per fix session). Sessions are tagged
+`sda-verify` / `sda-fix` / `sda-regression` / `issue-<n>`, so the sessions list filtered by tag is
+the live view of what is running.
 
-### What polling costs
-
-Each REPORT invocation starts one Devin session, whether or not anything finished in the meantime:
-hourly means ~720 sessions a month, each doing one API-driven command. That is real spend, so the
-digest reports it on its own line (`ACUs polling (REPORT itself)`, read from the `sda-report`
-sessions) instead of hiding it in the loop's totals, and the ACU figures for fix/verify work
-exclude it. If the price is not worth the freshness, lower the cadence: nothing in the loop
-depends on the interval, since every published comment is keyed by session id and skipped on the
-next run.
+Waiting inside the run is the mechanism because automations have no completion callback — the
+same constraint that makes the TESTING cadence counter derived rather than stored. A TESTING or
+AUTOPR session therefore lives as long as the session it waits on.
 
 ## Self-healing
 
@@ -316,9 +289,9 @@ smallest fix, add a test, and run the probes and the surrounding unit tests befo
 both directions: the issue states they must not be edited or relaxed.
 
 Two things keep the loop finite. A `regression_filed` marker keyed by the verification session,
-found on any PR thread in the window, means the failure already has an issue, so neither TESTING
-nor REPORT files it twice, and a replayed issue event finds the live `issue-<n>` session and
-starts nothing. And each filed issue records its
+found on any PR thread in the window, means the failure already has an issue, so a replayed
+TESTING run does not file it twice, and a replayed issue event finds the live `issue-<n>`
+session or the open fix PR and starts nothing. And each filed issue records its
 `regression_depth`; a PR that closes a regression issue inherits it, so after `MAX_CHAIN_DEPTH`
 failed automated attempts on the same chain the run writes `regression_escalated` on the PR and
 stops instead of spending ACUs in a cycle.

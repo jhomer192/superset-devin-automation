@@ -1,14 +1,17 @@
-"""AUTOPR: one fix session per issue the loop decides to work on.
+"""AUTOPR: one fix session per issue the loop decides to work on, and its outcome on the issue.
 
 Two ways in. A `github:issues` event carrying the `sda-regression` label (an issue TESTING just
 filed) starts the fix session for that one issue, and only that one. The Friday sweep triages
 every open `ready` issue, deflects at zero ACU, and starts a session for each eligible issue that
-does not already have one in flight.
+does not already have one in flight. With `wait`, the run then polls every session it started
+and writes the verdict comment (status, PR, probe exit codes, ACUs) onto the issue.
 """
 
 from __future__ import annotations
 
 import logging
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -16,10 +19,11 @@ from .devin_api import DevinClient
 from .github_api import GitHubClient, closing_issue_numbers
 from .ledger import IssueLedger, LedgerEntry, find
 from .prompts import fix_session_prompt
+from .publish import post_outcome, session_acus, verdict
 from .registry import Registry
 from .regression import FIX_TAG, REGRESSION_LABEL, regression_record, start_regression_fix
 from .schema import FIX_SCHEMA
-from .sessions import holds_slot
+from .sessions import holds_slot, wait_until_finished
 from .triage import Decision, Triage, classify
 
 log = logging.getLogger(__name__)
@@ -36,9 +40,39 @@ class AutoprReport:
     started: list[dict[str, Any]] = field(default_factory=list)
     deflected: list[dict[str, Any]] = field(default_factory=list)
     skipped_in_flight: list[dict[str, Any]] = field(default_factory=list)
+    finished: list[dict[str, Any]] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return self.__dict__.copy()
+
+
+def publish_fixes(
+    devin: DevinClient,
+    ledger: IssueLedger,
+    report: AutoprReport,
+    sleep: Callable[[float], None],
+) -> None:
+    """Wait for every session this run started, then put each verdict on its issue."""
+    acu_cache: dict[str, float] = {}
+    for started in report.started:
+        session = wait_until_finished(devin, str(started["session_id"]), sleep)
+        acus = session_acus(devin, session, acu_cache)
+        posted = post_outcome(
+            ledger=ledger, session=session, kind="fix", threads=[int(started["issue"])], acus=acus
+        )
+        output = session.get("structured_output") or {}
+        report.finished.append(
+            {
+                "issue": started["issue"],
+                "session_id": started["session_id"],
+                "status": session.get("status"),
+                "verdict": verdict(session.get("structured_output")),
+                "pr_url": output.get("pr_url"),
+                "acus": acus,
+                "posted": bool(posted),
+            }
+        )
+        log.info("AUTOPR: %s finished: %s", started["session_id"], report.finished[-1]["verdict"])
 
 
 def extract_regression_issue(event: dict[str, Any]) -> dict[str, Any]:
@@ -59,6 +93,8 @@ def run_autopr_for_issue(
     target_repo: str,
     automation_repo: str,
     event: dict[str, Any],
+    wait: bool = False,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> AutoprReport:
     report = AutoprReport(trigger="github:issues", scanned=1)
     issue = extract_regression_issue(event)
@@ -92,6 +128,8 @@ def run_autopr_for_issue(
         record=record,
     )
     report.started.append(started)
+    if wait:
+        publish_fixes(devin, ledger, report, sleep)
     return report
 
 
@@ -134,10 +172,18 @@ def run_autopr(
     ready_label: str,
     playbook_id: str | None = None,
     event: dict[str, Any] | None = None,
+    wait: bool = False,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> AutoprReport:
     if event is not None:
         return run_autopr_for_issue(
-            devin=devin, gh=gh, target_repo=target_repo, automation_repo=automation_repo, event=event
+            devin=devin,
+            gh=gh,
+            target_repo=target_repo,
+            automation_repo=automation_repo,
+            event=event,
+            wait=wait,
+            sleep=sleep,
         )
     report = AutoprReport()
     if not playbook_id:
@@ -198,4 +244,6 @@ def run_autopr(
         )
         report.started.append({"issue": number, "session_id": session_id})
         log.info("AUTOPR: #%d -> session %s", number, session_id)
+    if wait:
+        publish_fixes(devin, ledger, report, sleep)
     return report
