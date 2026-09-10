@@ -125,7 +125,8 @@ PROBE_LIST="${OUT}/probes.tsv"
 python3 "${here}/list_probes.py" --issues "${ISSUES}" --regression "${REGRESSION}" >"${PROBE_LIST}"
 
 boot_app() {  # <checkout> <role> <port> -- own database per role; sets SUPERSET_URL and GUNICORN_PID
-  local src="$1" role="$2" port="$3" db="superset_${role}"
+  local src="$1" role="$2" port="$3"
+  local db="superset_${role}"
   docker exec sda-postgres psql -U superset -d superset -qc "CREATE DATABASE ${db}" >/dev/null 2>&1 || true
   export SUPERSET__SQLALCHEMY_DATABASE_URI="postgresql+psycopg2://superset:superset@127.0.0.1:${PG_PORT}/${db}"
   (
@@ -153,7 +154,8 @@ boot_app() {  # <checkout> <role> <port> -- own database per role; sets SUPERSET
 
 run_probe() {  # <issue> <probe_id> <kind> <script> <checkout> <role>
   local issue="$1" id="$2" kind="$3" script="$4" src="$5" role="$6"
-  local log="${OUT}/$(echo "${id}" | tr '/' '_')-${role}.log"
+  local log
+  log="${OUT}/$(echo "${id}" | tr '/' '_')-${role}.log"
   SUPERSET_SRC="${src}" bash "${root}/${script}" >"${log}" 2>&1
   local code=$?
   python3 - "$PROBE_RESULTS" "$issue" "$id" "$kind" "$role" "$code" "$log" <<'PY'
