@@ -291,13 +291,16 @@ fails on a commit already on `master`. TESTING files that verdict as work
 `sda-regression`/`regression` naming the PR whose merge triggered the verification, listing every
 PR in the verified window (any of them could be the cause), the HEAD and BASE SHAs, the probe
 table with both exit codes and the captured evidence, plus a `regression_depth` ledger entry with
-the PR, window and probes. The `labeled` event for `sda-regression` runs AUTOPR, which reads that
-entry and starts one fix session tagged `sda-fix`/`sda-regression`. The verdict comment still
-lands on every PR thread in the window; only the remediation is once per failed verification,
-whatever the cadence. That session must reproduce the failure before touching anything, make the
-smallest fix, add a test, and run the probes and the surrounding unit tests before opening its PR
-— and when that PR merges, TESTING verifies it like any other. The probes are the contract in
-both directions: the issue states they must not be edited or relaxed.
+the PR, window and probes. If an open `sda-regression` issue's `regression_depth` record already
+names exactly the same probe set, the run adopts that issue (a `regression_filed` entry with
+`adopted: true` on the PR and a comment on the issue) instead of filing another; a different or
+larger probe set, or a closed issue, still files. The `labeled` event for `sda-regression` runs
+AUTOPR, which reads that entry and starts one fix session tagged `sda-fix`/`sda-regression`. The
+verdict comment still lands on every PR thread in the window; only the remediation is once per
+failed verification, whatever the cadence. That session must reproduce the failure before
+touching anything, make the smallest fix, add a test, and run the probes and the surrounding unit
+tests before opening its PR — and when that PR merges, TESTING verifies it like any other. The
+probes are the contract in both directions: the issue states they must not be edited or relaxed.
 
 Two things keep the loop finite. A `regression_filed` marker keyed by the verification session,
 found on any PR thread in the window, means the failure already has an issue, so a replayed
