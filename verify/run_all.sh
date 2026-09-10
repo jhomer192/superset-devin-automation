@@ -8,8 +8,9 @@
 #   1. clone the target repo twice: HEAD (merged commit) and BASE (its first parent)
 #   2. start a real PostgreSQL (docker) + Redis for the integration lane
 #   3. install backend requirements for HEAD into a venv; npm ci && npm run build the frontend
-#   4. superset db upgrade / init / create admin, boot gunicorn on :8088, wait for /health
-#   5. run every probe for --issues at HEAD (must pass) and at BASE (must fail)
+#   4. per checkout: db upgrade / init / create admin on its own database, boot gunicorn
+#      (HEAD on :8088, BASE on :8089), wait for /health, run every probe against THAT app
+#   5. probes for --issues must pass at HEAD and fail at BASE
 #      run every probe for --regression at HEAD (must pass); BASE result recorded only
 #   6. write verify/out/result.json matching orchestrator.schema.VERIFICATION_SCHEMA and exit
 #      0 iff every acceptance condition held.
@@ -107,7 +108,7 @@ stage frontend_build
   npm ci --no-audit --no-fund && npm run build
 ) >"${OUT}/frontend_build.log" 2>&1 || fail_stage frontend_build "npm ci / npm run build failed at ${HEAD_SHA} (see verify/out/frontend_build.log)"
 
-# ---- 4. boot superset -----------------------------------------------------------------------
+# ---- 4 + 5. boot each checkout on its own DB and port, probe that role against that app -------------
 stage boot
 cat >"${WORK}/superset_config.py" <<EOF
 import os
@@ -119,30 +120,37 @@ FEATURE_FLAGS = {"ALERT_REPORTS": True}
 EOF
 export SUPERSET_CONFIG_PATH="${WORK}/superset_config.py"
 export SUPERSET_ADMIN_USER=admin SUPERSET_ADMIN_PASSWORD=admin
-(
-  cd "${HEAD_DIR}"
-  "${VENV}/bin/superset" db upgrade
-  "${VENV}/bin/superset" fab create-admin --username admin --firstname a --lastname a \
-    --email admin@example.com --password admin
-  "${VENV}/bin/superset" init
-) >"${OUT}/boot.log" 2>&1 || fail_stage boot "superset db upgrade/init failed (see verify/out/boot.log)"
-(
-  cd "${HEAD_DIR}"
-  "${VENV}/bin/gunicorn" -w 2 -b "127.0.0.1:${SUPERSET_PORT}" "superset.app:create_app()" \
-    >>"${OUT}/boot.log" 2>&1 &
-  echo $! >"${WORK}/gunicorn.pid"
-)
-GUNICORN_PID="$(cat "${WORK}/gunicorn.pid")"
-export SUPERSET_URL="http://127.0.0.1:${SUPERSET_PORT}"
-for _ in $(seq 1 120); do
-  curl -fsS "${SUPERSET_URL}/health" >/dev/null 2>&1 && break
-  sleep 2
-done
-curl -fsS "${SUPERSET_URL}/health" >/dev/null 2>&1 || fail_stage boot "Superset never answered /health"
-
-# ---- 5. probes ----------------------------------------------------------------------------
-stage probes
 PROBE_RESULTS="${OUT}/probes.jsonl"; : >"${PROBE_RESULTS}"
+PROBE_LIST="${OUT}/probes.tsv"
+python3 "${here}/list_probes.py" --issues "${ISSUES}" --regression "${REGRESSION}" >"${PROBE_LIST}"
+
+boot_app() {  # <checkout> <role> <port> -- own database per role; sets SUPERSET_URL and GUNICORN_PID
+  local src="$1" role="$2" port="$3" db="superset_${role}"
+  docker exec sda-postgres psql -U superset -d superset -qc "CREATE DATABASE ${db}" >/dev/null 2>&1 || true
+  export SUPERSET__SQLALCHEMY_DATABASE_URI="postgresql+psycopg2://superset:superset@127.0.0.1:${PG_PORT}/${db}"
+  (
+    cd "${src}"
+    export PYTHONPATH="${src}${PYTHONPATH:+:${PYTHONPATH}}"
+    "${VENV}/bin/superset" db upgrade
+    "${VENV}/bin/superset" fab create-admin --username admin --firstname a --lastname a \
+      --email admin@example.com --password admin
+    "${VENV}/bin/superset" init
+  ) >"${OUT}/boot-${role}.log" 2>&1 || fail_stage boot "superset db upgrade/init failed at ${role} (see verify/out/boot-${role}.log)"
+  (
+    cd "${src}"
+    PYTHONPATH="${src}${PYTHONPATH:+:${PYTHONPATH}}" "${VENV}/bin/gunicorn" -w 2 -b "127.0.0.1:${port}" \
+      "superset.app:create_app()" >>"${OUT}/boot-${role}.log" 2>&1 &
+    echo $! >"${WORK}/gunicorn-${role}.pid"
+  )
+  GUNICORN_PID="$(cat "${WORK}/gunicorn-${role}.pid")"
+  export SUPERSET_URL="http://127.0.0.1:${port}"
+  for _ in $(seq 1 120); do
+    curl -fsS "${SUPERSET_URL}/health" >/dev/null 2>&1 && break
+    sleep 2
+  done
+  curl -fsS "${SUPERSET_URL}/health" >/dev/null 2>&1 || fail_stage boot "Superset at ${role} never answered /health"
+}
+
 run_probe() {  # <issue> <probe_id> <kind> <script> <checkout> <role>
   local issue="$1" id="$2" kind="$3" script="$4" src="$5" role="$6"
   local log="${OUT}/$(echo "${id}" | tr '/' '_')-${role}.log"
@@ -157,10 +165,21 @@ with open(path, "a") as f:
 PY
   echo "  ${role}/${id} -> exit ${code}" >&2
 }
-while IFS=$'\t' read -r issue pid kind script; do
-  run_probe "${issue}" "${pid}" "${kind}" "${script}" "${HEAD_DIR}" head
-  run_probe "${issue}" "${pid}" "${kind}" "${script}" "${BASE_DIR}" base
-done < <(python3 "${here}/list_probes.py" --issues "${ISSUES}" --regression "${REGRESSION}")
+
+probe_checkout() {  # <checkout> <role> <port>
+  boot_app "$@"
+  stage probes
+  while IFS=$'\t' read -r issue pid kind script; do
+    run_probe "${issue}" "${pid}" "${kind}" "${script}" "$1" "$2"
+  done <"${PROBE_LIST}"
+  kill "${GUNICORN_PID}" 2>/dev/null || true
+  wait "${GUNICORN_PID}" 2>/dev/null || true
+}
+
+probe_checkout "${HEAD_DIR}" head "${SUPERSET_PORT}"
+HEAD_URL="${SUPERSET_URL}"
+probe_checkout "${BASE_DIR}" base "$((SUPERSET_PORT + 1))"
+SUPERSET_URL="${HEAD_URL}"
 
 # ---- 6. verdict -------------------------------------------------------------------------
 stage verdict
