@@ -40,10 +40,22 @@ class IssueSpec:
 
 
 @dataclass(frozen=True)
+class Requirement:
+    """One PRD requirement: a stable id from the target repo's PRD.md and the probes that hold it."""
+
+    id: str
+    title: str
+    probes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class Registry:
     repo: str
     baseline_sha: str
     issues: tuple[IssueSpec, ...]
+    prd_path: str = "PRD.md"
+    requirements: tuple[Requirement, ...] = ()
+    standalone_probes: tuple[Probe, ...] = ()
 
     def by_number(self, number: int) -> IssueSpec | None:
         return next((i for i in self.issues if i.number == number), None)
@@ -54,6 +66,37 @@ class Registry:
             spec = self.by_number(n)
             if spec:
                 out.extend(spec.probes)
+        return out
+
+    def all_probes(self) -> dict[str, tuple[int, Probe]]:
+        """Every probe by id with the issue it belongs to (0 for a PRD-only probe)."""
+        out: dict[str, tuple[int, Probe]] = {}
+        for issue in self.issues:
+            for p in issue.probes:
+                out.setdefault(p.id, (issue.number, p))
+        for p in self.standalone_probes:
+            out.setdefault(p.id, (0, p))
+        return out
+
+    def requirement_ids(self) -> list[str]:
+        return [r.id for r in self.requirements]
+
+    def requirements_of(self, probe_id: str) -> list[str]:
+        return [r.id for r in self.requirements if probe_id in r.probes]
+
+    def requirement_probes(self, ids: list[str]) -> list[tuple[int, Probe]]:
+        """Probes for the named requirements in registry order, each once."""
+        known = self.all_probes()
+        wanted = set(ids)
+        out: list[tuple[int, Probe]] = []
+        seen: set[str] = set()
+        for req in self.requirements:
+            if req.id not in wanted:
+                continue
+            for pid in req.probes:
+                if pid not in seen:
+                    seen.add(pid)
+                    out.append(known[pid])
         return out
 
 
@@ -87,8 +130,28 @@ def load_registry(path: Path = REGISTRY_PATH) -> Registry:
                 triage_note=item.get("triage_note"),
             )
         )
-    return Registry(
+    standalone = tuple(Probe(p["id"], p["kind"], p["script"]) for p in raw.get("probes", []))
+    for p in standalone:
+        if p.kind not in PROBE_KINDS:
+            raise ValueError(f"probe {p.id}: unknown probe kind {p.kind!r}")
+        if not (path.parent.parent / p.script).exists():
+            raise FileNotFoundError(f"probe {p.id}: script {p.script} missing")
+    prd = raw.get("prd") or {}
+    requirements = tuple(
+        Requirement(str(r["id"]), str(r["title"]), tuple(str(p) for p in r.get("probes", [])))
+        for r in prd.get("requirements", [])
+    )
+    registry = Registry(
         repo=raw["repo"],
         baseline_sha=raw["baseline_sha"],
         issues=tuple(sorted(issues, key=lambda i: i.number)),
+        prd_path=str(prd.get("path", "PRD.md")),
+        requirements=requirements,
+        standalone_probes=standalone,
     )
+    probe_ids = registry.all_probes()
+    for req in requirements:
+        for pid in req.probes:
+            if pid not in probe_ids:
+                raise ValueError(f"requirement {req.id}: unknown probe id {pid!r}")
+    return registry

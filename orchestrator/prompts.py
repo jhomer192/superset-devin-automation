@@ -58,29 +58,27 @@ acceptance_met is the probe's exit code being 0, nothing else.
 """
 
 VERIFY_PLAYBOOK_BODY = """\
-You are verifying that a range of merges into the target repository introduced no regressions.
-The prompt gives the target and automation repositories, the HEAD and BASE commits, the PR that
-triggered the run, the issues in the range and the probes; everything below is the same on
+You are verifying that the target repository still meets its PRD (PRD.md in that repository)
+after a merge. The prompt gives the target and automation repositories, the HEAD commit, the PR
+that triggered the run, the PRD requirement ids and the probes; everything below is the same on
 every run.
 
 Do exactly this; the verdict comes from exit codes, not from your reading of the code:
 
 1. git clone the automation repository into ./automation and cd into it.
-2. Run the verify/run_all.sh command line given in the prompt
-   (--repo, --head, --base, --issues). The script clones the target repository at HEAD and at
-   BASE, stands up a real Postgres and Redis in docker, installs Python requirements, runs
-   `npm ci && npm run build` in superset-frontend, boots Superset against Postgres and waits for
-   `/health`, then runs every probe at HEAD and again at BASE and writes verify/out/result.json.
-   It exits 0 only if the build and boot succeeded and every probe for the closed issues passes
-   at HEAD and MUST FAIL at BASE (a probe that already passes at BASE proves nothing and fails
-   the verification).
+2. Run the verify/run_all.sh command line given in the prompt (--repo, --head, --requirements).
+   The script clones the target repository at HEAD, stands up a real Postgres and Redis in
+   docker, installs Python requirements, runs `npm ci && npm run build` in superset-frontend,
+   boots Superset against Postgres and waits for `/health`, then runs every probe of the named
+   requirements against that app and writes verify/out/result.json. It exits 0 only if the build
+   and boot succeeded and every probe exited 0.
 3. Copy verify/out/result.json into the structured output verbatim where fields overlap:
    - status "ok" when the script produced a result file (even if acceptance_met is false).
    - acceptance_met = the script's overall verdict (exit code 0).
    - probe_command = the exact verify/run_all.sh command line you ran.
    - probe_exit_code = its exit code.
    - results = the per-probe array from the result file (issue, probe, kind, head_exit_code,
-     base_exit_code, acceptance_met, evidence).
+     acceptance_met, evidence, requirements).
    - evidence = the last ~200 lines of the script's stdout/stderr.
    - status "error" with error_message only when the script could not run at all (no result
      file). Do NOT include acceptance_met in that case.
@@ -173,31 +171,29 @@ acceptance_met is the probe's exit code being 0, nothing else.
 """
 
 
-def verification_command(target_repo: str, head_sha: str, base_sha: str, issue_numbers: list[int]) -> str:
-    issues = ",".join(str(n) for n in issue_numbers)
-    return f'verify/run_all.sh --repo {target_repo} --head {head_sha} --base {base_sha} --issues "{issues}"'
+def verification_command(target_repo: str, head_sha: str, requirements: list[str]) -> str:
+    return (
+        f'verify/run_all.sh --repo {target_repo} --head {head_sha} --requirements "{",".join(requirements)}"'
+    )
 
 
 def verification_prompt(
     target_repo: str,
     automation_repo: str,
     head_sha: str,
-    base_sha: str,
     pr_url: str,
-    issue_numbers: list[int],
+    requirements: list[str],
     probes: list[Probe],
     playbook_id: str | None = None,
 ) -> str:
     probe_lines = "\n".join(f"  - {p.id} ({p.kind})" for p in probes) if probes else "  (none)"
-    issues = ", ".join(f"#{n}" for n in issue_numbers) or "none referenced"
     variables = f"""\
-Regression verification for {pr_url} (merged into {target_repo}).
+PRD verification for {pr_url} (merged into {target_repo}).
 
 HEAD (merged commit): {head_sha}
-BASE:                 {base_sha}
-Issues in range: {issues}
+PRD requirements (PRD.md in {target_repo}): {", ".join(requirements) or "none"}
 Automation repository: https://github.com/{automation_repo}
-Command: {verification_command(target_repo, head_sha, base_sha, issue_numbers)}
+Command: {verification_command(target_repo, head_sha, requirements)}
 Probes to run (from probes/registry.json in the automation repository):
 {probe_lines}
 """
