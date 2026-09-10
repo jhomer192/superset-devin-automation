@@ -23,6 +23,7 @@ class Settings:
     verify_every_n_merges: int
     report_digest_issue: int | None
     report_digest_every_hours: int
+    acu_usd: float | None
     simulate: bool
     log_level: str
 
@@ -68,6 +69,8 @@ def load_settings(simulate: bool = False) -> Settings:
     digest_hours = int(env.get("REPORT_DIGEST_EVERY_HOURS", "24") or 24)
     if digest_hours < 1:
         raise SystemExit("REPORT_DIGEST_EVERY_HOURS must be >= 1")
+    # The API bills in ACUs and quotes no price, so money is only reported at a rate given here.
+    rate = env.get("ACU_USD", "").strip()
     return Settings(
         devin_api_base=env.get("DEVIN_API_BASE", "https://api.devin.ai").rstrip("/"),
         # the second names are the Devin secret names this loop is provisioned with
@@ -81,6 +84,7 @@ def load_settings(simulate: bool = False) -> Settings:
         verify_every_n_merges=every,
         report_digest_issue=int(digest_issue) if digest_issue else None,
         report_digest_every_hours=digest_hours,
+        acu_usd=float(rate) if rate else None,
         simulate=simulate or env.get("SIMULATE", "").lower() in {"1", "true", "yes"},
         log_level=env.get("LOG_LEVEL", "INFO"),
     )

@@ -81,6 +81,19 @@ class FakeDevin:
             "avg_acus_per_session": round(sum(acus) / len(acus), 3) if acus else 0.0,
         }
 
+    def pr_metrics(self, time_after: int, time_before: int) -> JSON:
+        prs = [pr for s in self.sessions.values() for pr in s["pull_requests"]]
+        states = [p.get("pr_state") for p in prs]
+        return {
+            "prs_created_count": len(prs),
+            "prs_opened_count": states.count("open"),
+            "prs_merged_count": states.count("merged"),
+            "prs_closed_count": states.count("closed"),
+        }
+
+    def org_consumption(self, time_after: int, time_before: int) -> JSON:
+        return {"total_acus": round(sum(self.consumption.values()), 3), "consumption_by_date": []}
+
     def sessions_insights(self, **params: Any) -> list[JSON]:
         return [{"session_id": s["session_id"], "status": s["status"]} for s in self.sessions.values()]
 
@@ -214,6 +227,18 @@ class FakeGitHub:
         ]
 
     def get_issue(self, repo: str, number: int) -> JSON:
+        return dict(self.issues[number])
+
+    def create_issue(self, repo: str, title: str, body: str, labels: list[str]) -> JSON:
+        number = max([*self.issues, *self.pulls], default=0) + 1
+        self.issues[number] = {
+            "number": number,
+            "title": title,
+            "body": body,
+            "state": "open",
+            "labels": [{"name": name} for name in labels],
+            "html_url": f"https://github.com/{repo}/issues/{number}",
+        }
         return dict(self.issues[number])
 
     def list_issue_comments(self, repo: str, number: int) -> list[JSON]:

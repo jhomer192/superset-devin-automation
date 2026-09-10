@@ -533,6 +533,7 @@ def do_report(devin, gh, *, digest_issue=None, now=None, digest_every_hours=24):
         devin=devin,
         gh=gh,
         target_repo=REPO,
+        automation_repo=AUTO,
         deflections=lambda: 0,
         digest_issue=digest_issue,
         digest_every_hours=digest_every_hours,
@@ -587,6 +588,104 @@ def test_digest_is_appended_at_most_once_per_interval(world):
     assert do_report(devin, gh, digest_issue=1, now=now + timedelta(hours=25)).digest_posted
     digests = [c for c in gh.comments[1] if "metrics digest" in c["body"]]
     assert len(digests) == 2 and "verification:" in digests[0]["body"]
+
+
+# --- self-healing regressions -------------------------------------------------------------------
+
+
+def fail_verification(devin, gh, registry):
+    """A merged PR whose verification finds a probe failing at HEAD."""
+    session_id = do_reduce(devin, gh, registry).session_id
+    devin.advance(session_id, outcome="failed", acus=5.0)
+    return session_id
+
+
+def test_failed_verification_files_an_issue_and_starts_its_fix(registry, world):
+    devin, gh = world
+    session_id = fail_verification(devin, gh, registry)
+
+    filed = do_report(devin, gh).regressions_filed
+    assert len(filed) == 1
+    entry = filed[0]
+    assert entry["pr"] == 14 and entry["probes"] == ["issue_5/unit"] and entry["depth"] == 1
+
+    issue = gh.issues[entry["issue"]]
+    assert {label["name"] for label in issue["labels"]} == {"regression", "automation"}
+    assert "pull/14" in issue["body"] and "simulated pytest summary" in issue["body"]
+    assert session_id in issue["body"]
+
+    fix = devin.sessions[entry["session_id"]]
+    assert set(fix["tags"]) == {"sda-fix", "sda-regression", f"issue-{entry['issue']}"}
+    assert fix["structured_output_schema"]["title"] == "SupersetFixResult"
+    assert f"#{entry['issue']}" in fix["prompt"] and "issue_5/unit" in fix["prompt"]
+    assert "Closes #" in fix["prompt"]
+
+
+def test_a_failure_is_only_filed_once(registry, world):
+    devin, gh = world
+    fail_verification(devin, gh, registry)
+    first = do_report(devin, gh)
+    assert do_report(devin, gh).regressions_filed == []
+    assert len(gh.issues) == len({i["number"] for i in gh.issues.values()})
+    assert find(IssueLedger(gh, REPO).read(14), "regression_filed", issue=first.regressions_filed[0]["issue"])
+
+
+def test_a_regression_chain_stops_after_two_automated_attempts(registry, world):
+    devin, gh = world
+    fail_verification(devin, gh, registry)
+    issue = do_report(devin, gh).regressions_filed[0]["issue"]
+
+    # The fix for that issue lands and regresses again, twice.
+    depths = []
+    for pr_number in (101, 102):
+        pr = gh.merge(
+            pr_number,
+            branch="master",
+            sha=f"{pr_number:040x}",
+            title=f"fix: attempt {pr_number}",
+            body=f"Closes #{issue}",
+        )
+        devin.advance(
+            do_reduce(devin, gh, registry, event={**load_event(), "pull_request": pr}).session_id,
+            outcome="failed",
+            acus=1.0,
+        )
+        report = do_report(devin, gh)
+        depths.append(report)
+        issue = report.regressions_filed[0]["issue"] if report.regressions_filed else issue
+
+    assert depths[0].regressions_filed[0]["depth"] == 2 and depths[0].escalated == []
+    assert depths[1].regressions_filed == []
+    assert [(e["pr"], e["depth"]) for e in depths[1].escalated] == [(102, 3)]
+    assert "a human needs to look at it" in gh.comments[102][-1]["body"]
+
+
+def test_an_errored_verification_is_reported_but_not_filed_as_a_regression(registry, world):
+    devin, gh = world
+    devin.advance(do_reduce(devin, gh, registry).session_id, outcome="error", acus=0.2)
+    report = do_report(devin, gh)
+    assert report.posted and report.regressions_filed == []
+
+
+def test_metrics_track_regression_issues_and_their_prs(registry, world):
+    devin, gh = world
+    fail_verification(devin, gh, registry)
+    filed = do_report(devin, gh).regressions_filed[0]
+    devin.advance(filed["session_id"], outcome="ok", acus=2.0, pr_url="https://github.com/x/y/pull/7")
+
+    summary = metrics.collect(devin, deflections=0, days=30, acu_usd=2.5)
+    assert summary.regression_issues == 1 and summary.regression_fix_prs == 1
+    assert summary.regressions[0]["issue"] == filed["issue"]
+    assert summary.regressions[0]["pr_url"] == "https://github.com/x/y/pull/7"
+    assert summary.estimated_cost_usd == round(summary.total_acus * 2.5, 2)
+    assert summary.org_total_acus is not None and summary.pr_metrics["prs_merged_count"] == 1
+
+
+def test_cost_is_omitted_when_no_rate_is_configured(world):
+    devin, _ = world
+    summary = metrics.collect(devin, deflections=0, days=30)
+    assert summary.estimated_cost_usd is None
+    assert any("ACUs, not money" in limitation for limitation in summary.limitations)
 
 
 # --- verify/collect ---------------------------------------------------------------------------

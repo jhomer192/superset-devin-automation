@@ -1,0 +1,232 @@
+"""Close the loop on a failed verification: file an issue, then start a session to fix it.
+
+A verification session that reports `acceptance_met == false` has found a probe that fails on
+the merged commit. That is a regression in the target repo, and the loop treats it exactly like
+any other piece of work it owns: an issue with binding acceptance criteria, then a fix session
+whose verdict is a probe exit code. The filed issue is tagged into the fix session so REPORT
+publishes its outcome and the metrics count it with every other fix.
+
+The issue number is not known until GitHub assigns it, so idempotency is anchored on the PR
+thread instead: a `regression_filed` marker carrying the verification session id means this
+failure has already been turned into an issue.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Any
+
+from .devin_api import DevinClient
+from .github_api import GitHubClient, closing_issue_numbers
+from .ledger import IssueLedger, LedgerEntry, find
+from .prompts import regression_fix_prompt
+from .schema import FIX_SCHEMA
+
+log = logging.getLogger(__name__)
+
+FIX_TAG = "sda-fix"
+REGRESSION_TAG = "sda-regression"
+# Deliberately not MAP's `ready` label: the issue is filed together with the session that fixes
+# it, and MAP triages against the static probe registry, which a new regression is not in.
+REGRESSION_LABELS = ["regression", "automation"]
+# A fix that regresses again is filed once more; beyond that the chain stops and waits for a human,
+# so a Devin that cannot solve the problem cannot spend the organization's ACUs in a cycle.
+MAX_CHAIN_DEPTH = 2
+
+
+@dataclass(frozen=True)
+class Failure:
+    """One probe that failed on the merged commit."""
+
+    probe: str
+    issue: int | None
+    head_exit_code: int | None
+    base_exit_code: int | None
+    evidence: str
+
+    @property
+    def caption(self) -> str:
+        return f"`{self.probe}`" + (f" (guards #{self.issue})" if self.issue else "")
+
+
+def failures(output: dict[str, Any]) -> list[Failure]:
+    """The probes behind an `acceptance_met == false` verdict."""
+    results = output.get("results") or []
+    failed = [
+        Failure(
+            probe=str(r.get("probe")),
+            issue=r.get("issue"),
+            head_exit_code=r.get("head_exit_code"),
+            base_exit_code=r.get("base_exit_code"),
+            evidence=str(r.get("evidence") or ""),
+        )
+        for r in results
+        if not r.get("acceptance_met")
+    ]
+    if failed:
+        return failed
+    # No per-probe breakdown: the run as a whole failed, so the command line is the evidence.
+    return [
+        Failure(
+            probe=str(output.get("probe_command") or "verify/run_all.sh"),
+            issue=None,
+            head_exit_code=output.get("probe_exit_code"),
+            base_exit_code=None,
+            evidence=str(output.get("evidence") or ""),
+        )
+    ]
+
+
+def issue_title(pr_number: int, items: list[Failure]) -> str:
+    first = items[0].probe.split()[0]
+    more = f" (+{len(items) - 1} more)" if len(items) > 1 else ""
+    return f"Regression on merged PR #{pr_number}: probe {first} fails at HEAD{more}"
+
+
+def issue_body(
+    *,
+    target_repo: str,
+    automation_repo: str,
+    pr_url: str,
+    head_sha: str,
+    base_sha: str | None,
+    items: list[Failure],
+    session_url: str,
+) -> str:
+    rows = "\n".join(
+        f"| {f.probe} | {f.issue or '-'} | {f.base_exit_code if f.base_exit_code is not None else '-'} "
+        f"| {f.head_exit_code} |"
+        for f in items
+    )
+    evidence = "\n\n".join(
+        f"<details><summary>{f.probe}</summary>\n\n```\n{f.evidence[-4000:]}\n```\n</details>"
+        for f in items
+        if f.evidence
+    )
+    return f"""Filed automatically by the regression verification of {pr_url}.
+
+The merged commit `{head_sha}` fails a probe that must pass. Verification session: {session_url}
+
+| probe | guards issue | exit at BASE | exit at HEAD |
+|-------|--------------|--------------|--------------|
+{rows}
+
+BASE commit: `{base_sha or "unknown"}`
+
+## Acceptance criteria
+
+Every probe in the table above exits 0 against a checkout of `{target_repo}` at the fixed
+revision, run from a clone of https://github.com/{automation_repo}:
+
+```
+probes/run.sh <probe id>          # SUPERSET_SRC=<superset checkout> PROBE_PYTHON=<venv python>
+```
+
+The probes are the contract: they must not be edited, skipped or relaxed. A change that makes a
+probe pass by weakening it does not satisfy this issue.
+
+{evidence}
+"""
+
+
+def chain_depth(gh: GitHubClient, ledger: IssueLedger, target_repo: str, pr_number: int) -> int:
+    """How many regressions deep the PR under verification already is.
+
+    A PR that closes a regression issue inherits that issue's depth, so a fix that regresses again
+    is one link further down the same chain rather than a fresh failure.
+    """
+    pr = gh.get_pull(target_repo, pr_number)
+    closes = closing_issue_numbers(f"{pr.get('title', '')}\n{pr.get('body', '')}", target_repo)
+    depths = [
+        int(entry.data.get("depth", 0))
+        for number in closes
+        for entry in find(ledger.read(number), "regression_depth")
+    ]
+    return max(depths, default=0)
+
+
+def file_regression(
+    *,
+    devin: DevinClient,
+    gh: GitHubClient,
+    target_repo: str,
+    automation_repo: str,
+    session: dict[str, Any],
+    pr_number: int,
+    pr_url: str,
+    depth: int = 0,
+) -> dict[str, Any]:
+    """Open a regression issue for a failed verification and start the session that fixes it."""
+    output = session.get("structured_output") or {}
+    items = failures(output)
+    session_url = str(session.get("url") or session.get("session_id"))
+    issue = gh.create_issue(
+        target_repo,
+        issue_title(pr_number, items),
+        issue_body(
+            target_repo=target_repo,
+            automation_repo=automation_repo,
+            pr_url=pr_url,
+            head_sha=str(output.get("head_sha") or ""),
+            base_sha=output.get("base_sha"),
+            items=items,
+            session_url=session_url,
+        ),
+        list(REGRESSION_LABELS),
+    )
+    number = int(issue["number"])
+    issue_url = str(issue.get("html_url") or f"https://github.com/{target_repo}/issues/{number}")
+
+    fix = devin.create_session(
+        {
+            "prompt": regression_fix_prompt(
+                target_repo=target_repo,
+                automation_repo=automation_repo,
+                issue_number=number,
+                issue_url=issue_url,
+                pr_url=pr_url,
+                head_sha=str(output.get("head_sha") or ""),
+                probes=[f.probe for f in items],
+            ),
+            "title": f"Fix regression {target_repo}#{number} from {pr_url}",
+            "tags": [FIX_TAG, REGRESSION_TAG, f"issue-{number}"],
+            "structured_output_schema": FIX_SCHEMA,
+            "structured_output_required": True,
+            "resumable": True,
+        }
+    )
+    fix_id = str(fix["session_id"])
+
+    ledger = IssueLedger(gh, target_repo)
+    ledger.append(
+        number,
+        "Remediation session started",
+        LedgerEntry(
+            "session_started",
+            data={
+                "session_id": fix_id,
+                "kind": "fix",
+                "regression_of": pr_url,
+                "depth": depth,
+            },
+        ),
+        [
+            f"session: `{fix_id}`" + (f" ({fix['url']})" if fix.get("url") else ""),
+            f"deciding probes: {', '.join(f.probe for f in items)}",
+        ],
+    )
+    ledger.append(
+        number,
+        "Regression lineage",
+        LedgerEntry("regression_depth", data={"depth": depth, "regression_of": pr_url}),
+        [f"chain depth {depth} of {MAX_CHAIN_DEPTH}"],
+    )
+    log.info("REPORT: regression #%d filed for %s -> session %s", number, pr_url, fix_id)
+    return {
+        "issue": number,
+        "issue_url": issue_url,
+        "session_id": fix_id,
+        "probes": [f.probe for f in items],
+        "depth": depth,
+    }

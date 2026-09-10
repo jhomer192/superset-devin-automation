@@ -31,9 +31,13 @@ class DevinClient(Protocol):
 
     def session_metrics(self, time_after: int, time_before: int) -> JSON: ...
 
+    def pr_metrics(self, time_after: int, time_before: int) -> JSON: ...
+
     def sessions_insights(self, **params: Any) -> list[JSON]: ...
 
     def session_consumption(self, session_id: str) -> JSON: ...
+
+    def org_consumption(self, time_after: int, time_before: int) -> JSON: ...
 
 
 class LiveDevinClient:
@@ -94,6 +98,11 @@ class LiveDevinClient:
         result: JSON = self._get("/metrics/sessions", {"time_after": time_after, "time_before": time_before})
         return result
 
+    # GET /v3/organizations/{org_id}/metrics/prs  (PRs Devin authored, by state)
+    def pr_metrics(self, time_after: int, time_before: int) -> JSON:
+        result: JSON = self._get("/metrics/prs", {"time_after": time_after, "time_before": time_before})
+        return result
+
     # GET /v3/organizations/{org_id}/sessions/insights
     def sessions_insights(self, **params: Any) -> list[JSON]:
         params.setdefault("first", 100)
@@ -102,4 +111,9 @@ class LiveDevinClient:
     # GET /v3/organizations/{org_id}/consumption/daily/sessions/{session_id}
     def session_consumption(self, session_id: str) -> JSON:
         result: JSON = self._get(f"/consumption/daily/sessions/{session_id}")
+        return result
+
+    # GET /v3/organizations/{org_id}/consumption/daily  (whole-org ACUs; day boundary is 08:00 UTC)
+    def org_consumption(self, time_after: int, time_before: int) -> JSON:
+        result: JSON = self._get("/consumption/daily", {"time_after": time_after, "time_before": time_before})
         return result

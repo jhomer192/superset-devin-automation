@@ -7,6 +7,11 @@ Sources (all in https://docs.devin.ai/v3-openapi.yaml):
         -> per-session status, pull_requests[].pr_state, acus_consumed, structured_output
   GET /v3/organizations/{org_id}/sessions/insights (same filters)
   GET /v3/organizations/{org_id}/consumption/daily/sessions/{session_id} -> total_acus
+  GET /v3/organizations/{org_id}/consumption/daily -> org-wide total_acus for the window
+  GET /v3/organizations/{org_id}/metrics/prs -> PRs Devin authored, by state
+
+The API prices nothing, so a dollar figure only appears when ACU_USD supplies the rate the
+organization actually pays; otherwise the report stays in ACUs rather than inventing a number.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ log = logging.getLogger(__name__)
 
 FIX_TAG = "sda-fix"
 VERIFY_TAG = "sda-verify"
+REGRESSION_TAG = "sda-regression"
 
 
 @dataclass
@@ -43,6 +49,13 @@ class MetricsReport:
     verification_runs: int
     verification_passes: int
     triage_deflections: int
+    pr_metrics: dict[str, Any] = field(default_factory=dict)
+    org_total_acus: float | None = None
+    acu_usd: float | None = None
+    estimated_cost_usd: float | None = None
+    regression_issues: int = 0
+    regression_fix_prs: int = 0
+    regressions: list[dict[str, Any]] = field(default_factory=list)
     liveness: dict[str, int] = field(default_factory=dict)
     insights_count: int = 0
     limitations: list[str] = field(default_factory=list)
@@ -59,6 +72,33 @@ def _tags(session: dict[str, Any]) -> set[str]:
     return {str(t) for t in session.get("tags") or []}
 
 
+def _issue_tag(session: dict[str, Any]) -> int | None:
+    for tag in _tags(session):
+        if tag.startswith("issue-") and tag[len("issue-") :].isdigit():
+            return int(tag[len("issue-") :])
+    return None
+
+
+def _regressions(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One row per issue this loop filed against itself, with the PR that answers it."""
+    rows = []
+    for s in sessions:
+        if REGRESSION_TAG not in _tags(s):
+            continue
+        out = s.get("structured_output") or {}
+        rows.append(
+            {
+                "issue": _issue_tag(s),
+                "session_id": s.get("session_id"),
+                "status": s.get("status"),
+                "pr_url": out.get("pr_url"),
+                "acceptance_met": out.get("acceptance_met"),
+                "title": s.get("title"),
+            }
+        )
+    return sorted(rows, key=lambda r: (r["issue"] is None, r["issue"] or 0))
+
+
 def compute(
     sessions: list[dict[str, Any]],
     org_metrics: dict[str, Any],
@@ -66,6 +106,9 @@ def compute(
     deflections: int,
     window: tuple[datetime, datetime],
     insights_count: int = 0,
+    pr_metrics: dict[str, Any] | None = None,
+    org_total_acus: float | None = None,
+    acu_usd: float | None = None,
 ) -> MetricsReport:
     fix = [s for s in sessions if FIX_TAG in _tags(s)]
     verify = [s for s in sessions if VERIFY_TAG in _tags(s)]
@@ -84,6 +127,7 @@ def compute(
     for s in sessions:
         liveness[session_liveness(s).value] += 1
 
+    regressions = _regressions(sessions)
     runs = 0
     passes = 0
     for s in verify:
@@ -112,6 +156,13 @@ def compute(
         verification_runs=runs,
         verification_passes=passes,
         triage_deflections=deflections,
+        pr_metrics=dict(pr_metrics or {}),
+        org_total_acus=org_total_acus,
+        acu_usd=acu_usd,
+        estimated_cost_usd=round(total_acus * acu_usd, 2) if acu_usd else None,
+        regression_issues=len(regressions),
+        regression_fix_prs=sum(1 for r in regressions if r["pr_url"]),
+        regressions=regressions,
         liveness=liveness,
         insights_count=insights_count,
         limitations=[
@@ -124,6 +175,10 @@ def compute(
             "it is a cost-of-outcome number, not a per-PR cost.",
             "triage_deflections is counted from ledger comments on issues, so it needs GitHub "
             "access; it is 0 when the GitHub token is absent.",
+            "the API reports ACUs, not money; estimated_cost_usd is total_acus x ACU_USD and is "
+            "null unless that rate is configured.",
+            "pr_metrics and org_total_acus come from org-wide endpoints and include work this "
+            "automation did not do.",
         ],
     )
 
@@ -135,10 +190,14 @@ def collect(
     days: int = 30,
     now: datetime | None = None,
     with_consumption: bool = True,
+    acu_usd: float | None = None,
 ) -> MetricsReport:
     end = now or datetime.now(UTC)
     start = end - timedelta(days=days)
-    org_metrics = devin.session_metrics(int(start.timestamp()), int(end.timestamp()))
+    after, before = int(start.timestamp()), int(end.timestamp())
+    org_metrics = devin.session_metrics(after, before)
+    pr_metrics = devin.pr_metrics(after, before)
+    org_total_acus = float(devin.org_consumption(after, before).get("total_acus") or 0.0)
     sessions = devin.list_sessions(
         origins="automation",
         created_after=start.isoformat(timespec="seconds"),
@@ -158,4 +217,14 @@ def collect(
                 consumption[sid] = float(devin.session_consumption(sid).get("total_acus") or 0.0)
             except Exception as exc:  # noqa: BLE001 - one bad session must not sink the report
                 log.warning("consumption lookup failed for %s: %s", sid, exc)
-    return compute(sessions, org_metrics, consumption, deflections, (start, end), len(insights))
+    return compute(
+        sessions,
+        org_metrics,
+        consumption,
+        deflections,
+        (start, end),
+        len(insights),
+        pr_metrics=pr_metrics,
+        org_total_acus=org_total_acus,
+        acu_usd=acu_usd,
+    )

@@ -145,7 +145,8 @@ def report_payload(
         )
         + f"\nTarget repository: @{target_repo}\n"
         + "The command publishes the outcome of every finished fix/verification session to the "
-        "issue or PR it belongs to; sessions already reported are skipped.\n"
+        "issue or PR it belongs to; sessions already reported are skipped. A verification that "
+        "failed also gets a regression issue and a fix session started for it.\n"
     )
     return {
         "name": REPORT_NAME,

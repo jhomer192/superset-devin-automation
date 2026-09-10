@@ -77,7 +77,10 @@ def cmd_metrics(
     settings: Settings, devin: DevinClient, gh: GitHubClient, registry: Registry, days: int
 ) -> dict[str, Any]:
     return metrics.collect(
-        devin, deflections=count_deflections(gh, registry, settings.target_repo), days=days
+        devin,
+        deflections=count_deflections(gh, registry, settings.target_repo),
+        days=days,
+        acu_usd=settings.acu_usd,
     ).as_dict()
 
 
@@ -88,10 +91,12 @@ def cmd_report(
         devin=devin,
         gh=gh,
         target_repo=settings.target_repo,
+        automation_repo=settings.automation_repo,
         deflections=lambda: count_deflections(gh, registry, settings.target_repo),
         days=days,
         digest_issue=settings.report_digest_issue,
         digest_every_hours=settings.report_digest_every_hours,
+        acu_usd=settings.acu_usd,
     ).as_dict()
 
 
@@ -165,6 +170,18 @@ def cmd_simulate(settings: Settings, registry: Registry) -> dict[str, Any]:
     reporting = replace(settings, report_digest_issue=1)
     out["report"] = cmd_report(reporting, devin, gh, registry, days=30)
     out["report_rerun_is_idempotent"] = cmd_report(reporting, devin, gh, registry, days=30)
+
+    # A later merge regresses: verification fails, so REPORT files an issue and starts its fix.
+    # The fillers put the regressing merge on a window boundary whatever the cadence is.
+    for i in range(1, n):
+        filler = gh.merge(940 + i, branch=branch, sha=f"{940 + i:040x}", title=f"chore: merge {i}")
+        cmd_reduce(settings, devin, gh, registry, None, event={**event, "pull_request": filler})
+    bad = gh.merge(950, branch=branch, sha=f"{950:040x}", title="feat: a change that regresses")
+    bad_event = {**event, "number": bad["number"], "pull_request": bad}
+    out["regressing_merge_reduce"] = cmd_reduce(settings, devin, gh, registry, None, event=bad_event)
+    devin.advance(out["regressing_merge_reduce"]["session_id"], outcome="failed", acus=5.5)
+    out["report_files_regression"] = cmd_report(reporting, devin, gh, registry, days=30)
+    out["report_files_regression_once"] = cmd_report(reporting, devin, gh, registry, days=30)
 
     out["friday_2_map"] = cmd_map(settings, devin, gh, registry)
     out["metrics"] = cmd_metrics(settings, devin, gh, registry, days=30)

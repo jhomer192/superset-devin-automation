@@ -15,6 +15,7 @@ services:
       VERIFY_EVERY_N_MERGES: ${VERIFY_EVERY_N_MERGES:-1}
       REPORT_DIGEST_ISSUE: ${REPORT_DIGEST_ISSUE:-}
       REPORT_DIGEST_EVERY_HOURS: ${REPORT_DIGEST_EVERY_HOURS:-24}
+      ACU_USD: ${ACU_USD:-}
     volumes:
       - ./events:/events:ro
     command: ["simulate"]

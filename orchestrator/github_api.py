@@ -47,6 +47,8 @@ class GitHubClient(Protocol):
 
     def get_issue(self, repo: str, number: int) -> JSON: ...
 
+    def create_issue(self, repo: str, title: str, body: str, labels: list[str]) -> JSON: ...
+
     def list_issue_comments(self, repo: str, number: int) -> list[JSON]: ...
 
     def create_issue_comment(self, repo: str, number: int, body: str) -> JSON: ...
@@ -95,6 +97,15 @@ class LiveGitHubClient:
 
     def get_issue(self, repo: str, number: int) -> JSON:
         result: JSON = self._get(f"/repos/{repo}/issues/{number}")
+        return result
+
+    def create_issue(self, repo: str, title: str, body: str, labels: list[str]) -> JSON:
+        result: JSON = request_json(
+            "POST",
+            f"{self._base}/repos/{repo}/issues",
+            headers=self._headers,
+            body={"title": title, "body": body, "labels": labels},
+        )
         return result
 
     def list_issue_comments(self, repo: str, number: int) -> list[JSON]:

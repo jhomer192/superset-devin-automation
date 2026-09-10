@@ -183,6 +183,9 @@ executes both schemas against passing and failing payloads.
 | `verification_pass_rate` | verification sessions with `acceptance_met == true` ÷ verification sessions with a non-error output | sessions still running are excluded |
 | `triage_deflections` | `triage_deflected` ledger comments on the target repo's issues | needs `GITHUB_TOKEN`; 0 without it |
 | `liveness` | count per liveness bucket (live / awaiting_human / dead / terminal_suspended / unknown_suspended) | point-in-time |
+| `regression_issues`, `regression_fix_prs`, `regressions[]` | issues this loop filed off a failed verification, with the fix session, its status and the PR it produced | only issues filed by the loop itself |
+| `pr_metrics` | `GET /metrics/prs`: PRs Devin created / opened / merged / closed | organization-wide |
+| `total_acus`, `org_total_acus`, `estimated_cost_usd` | this loop's ACUs, the organization's ACUs from `GET /consumption/daily`, and money | the API prices nothing; USD appears only when `ACU_USD` is set |
 
 The report also carries a `limitations` list so a reader never has to infer them.
 
@@ -197,6 +200,24 @@ finish, and a `session_reported` marker already on the thread means the run skip
 the automation is safe to run as often as you like. Polling is the mechanism because automations
 have no completion callback — the same constraint that makes the REDUCE cadence counter derived
 rather than stored.
+
+## Self-healing
+
+A verification whose structured output says `acceptance_met == false` has found a probe that
+fails on a commit already on `master`. REPORT turns that verdict back into work
+(`orchestrator/regression.py`): it opens an issue on the target repo labelled
+`regression`/`automation` carrying the PR, the HEAD and BASE SHAs, the probe table with both exit
+codes and the captured evidence, then starts a fix session tagged `sda-fix`/`sda-regression` for
+it. That session must reproduce the failure before touching anything, make the smallest fix, add
+a test, and run the probes and the surrounding unit tests before opening its PR — and when that
+PR merges, REDUCE verifies it like any other. The probes are the contract in both directions:
+the issue states they must not be edited or relaxed.
+
+Two things keep the loop finite. A `regression_filed` marker on the PR thread means the failure
+already has an issue, so re-running REPORT files nothing. And each filed issue records its
+`regression_depth`; a PR that closes a regression issue inherits it, so after `MAX_CHAIN_DEPTH`
+failed automated attempts on the same chain the run writes `regression_escalated` on the PR and
+stops instead of spending ACUs in a cycle.
 
 ## Development
 

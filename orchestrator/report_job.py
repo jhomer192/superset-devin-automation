@@ -6,8 +6,13 @@ would otherwise only exist inside the session's structured output. This job poll
 for finished `sda-fix` / `sda-verify` sessions and writes one ledger comment per session onto the
 issue or PR it belongs to, then appends a metrics digest at most once per `digest_every_hours`.
 
+A verification that failed is not just reported: it is turned back into work. REPORT files a
+regression issue on the target repo and starts the fix session for it (see `regression`), which
+re-enters the same loop through that session's PR.
+
 Reporting is idempotent the same way the rest of the loop is: a `session_reported` marker keyed by
-session id already on the thread means the outcome has been published.
+session id already on the thread means the outcome has been published, and a `regression_filed`
+marker means the failure already has an issue.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ from .devin_api import DevinClient
 from .github_api import GitHubClient
 from .ledger import IssueLedger, LedgerEntry, find
 from .metrics import FIX_TAG, VERIFY_TAG, MetricsReport
+from .regression import MAX_CHAIN_DEPTH, chain_depth, file_regression
 from .sessions import is_finished
 
 log = logging.getLogger(__name__)
@@ -31,6 +37,8 @@ log = logging.getLogger(__name__)
 @dataclass
 class ReportReport:
     posted: list[dict[str, Any]] = field(default_factory=list)
+    regressions_filed: list[dict[str, Any]] = field(default_factory=list)
+    escalated: list[dict[str, Any]] = field(default_factory=list)
     unfinished: int = 0
     already_reported: int = 0
     digest_issue: int | None = None
@@ -93,6 +101,19 @@ def outcome_lines(session: dict[str, Any], acus: float | None) -> list[str]:
     return lines
 
 
+def _is_regression(output: dict[str, Any] | None) -> bool:
+    """A verdict of "the merged commit fails a probe", as opposed to a run that never happened."""
+    if not output:
+        return False
+    return output.get("status") == "ok" and output.get("acceptance_met") is False
+
+
+def _cost_line(report: MetricsReport) -> str:
+    if report.estimated_cost_usd is None:
+        return "cost: ACUs only; set ACU_USD to price them"
+    return f"cost: ${report.estimated_cost_usd} at {report.acu_usd} USD/ACU"
+
+
 def digest_lines(report: MetricsReport) -> list[str]:
     return [
         f"window: {report.window_start} .. {report.window_end}",
@@ -103,6 +124,11 @@ def digest_lines(report: MetricsReport) -> list[str]:
         f"(rate {report.verification_pass_rate})",
         f"ACUs: {report.total_acus} total, {report.acu_per_session} per session, "
         f"{report.acu_per_merged_pr} per merged PR",
+        _cost_line(report),
+        f"org-wide ACUs (all origins): {report.org_total_acus}",
+        f"Devin-authored PRs org-wide: {report.pr_metrics}",
+        f"regressions filed by this loop: {report.regression_issues} "
+        f"({report.regression_fix_prs} fix PRs opened)",
         f"triage deflections (0 ACU): {report.triage_deflections}",
         f"liveness: {report.liveness}",
     ]
@@ -129,15 +155,79 @@ def _acus(devin: DevinClient, session: dict[str, Any]) -> float | None:
         return float(acus) if acus is not None else None
 
 
+def _remediate(
+    *,
+    devin: DevinClient,
+    gh: GitHubClient,
+    ledger: IssueLedger,
+    target_repo: str,
+    automation_repo: str,
+    session: dict[str, Any],
+    pr_number: int,
+    report: ReportReport,
+) -> None:
+    """Turn one failed verification into an issue plus the session that fixes it."""
+    session_id = str(session.get("session_id"))
+    if find(ledger.read(pr_number), "regression_filed", session_id=session_id):
+        return
+    pr_url = f"https://github.com/{target_repo}/pull/{pr_number}"
+    depth = chain_depth(gh, ledger, target_repo, pr_number) + 1
+    if depth > MAX_CHAIN_DEPTH:
+        ledger.append(
+            pr_number,
+            "Regression not remediated automatically: chain depth exhausted",
+            LedgerEntry("regression_escalated", data={"session_id": session_id, "depth": depth}),
+            [
+                f"{MAX_CHAIN_DEPTH} automated attempts have already failed on this chain; "
+                "a human needs to look at it",
+            ],
+        )
+        report.escalated.append({"pr": pr_number, "session_id": session_id, "depth": depth})
+        log.warning("REPORT: regression chain on PR #%d exhausted at depth %d", pr_number, depth)
+        return
+
+    filed = file_regression(
+        devin=devin,
+        gh=gh,
+        target_repo=target_repo,
+        automation_repo=automation_repo,
+        session=session,
+        pr_number=pr_number,
+        pr_url=pr_url,
+        depth=depth,
+    )
+    ledger.append(
+        pr_number,
+        "Regression filed from the failed verification",
+        LedgerEntry(
+            "regression_filed",
+            data={
+                "session_id": session_id,
+                "issue": filed["issue"],
+                "fix_session_id": filed["session_id"],
+                "depth": depth,
+            },
+        ),
+        [
+            f"issue: {filed['issue_url']}",
+            f"fix session: `{filed['session_id']}`",
+            f"failing probes: {', '.join(filed['probes'])}",
+        ],
+    )
+    report.regressions_filed.append({"pr": pr_number, **filed})
+
+
 def run_report(
     *,
     devin: DevinClient,
     gh: GitHubClient,
     target_repo: str,
+    automation_repo: str,
     deflections: Callable[[], int],
     days: int = 30,
     digest_issue: int | None = None,
     digest_every_hours: int = 24,
+    acu_usd: float | None = None,
     now: datetime | None = None,
 ) -> ReportReport:
     end = now or datetime.now(UTC)
@@ -189,10 +279,23 @@ def run_report(
             report.posted.append({"thread": number, "kind": kind, "session_id": session_id})
             log.info("REPORT: %s session %s -> #%d", kind, session_id, number)
 
+        if kind == "verify" and _is_regression(session.get("structured_output")):
+            for number in threads:
+                _remediate(
+                    devin=devin,
+                    gh=gh,
+                    ledger=ledger,
+                    target_repo=target_repo,
+                    automation_repo=automation_repo,
+                    session=session,
+                    pr_number=number,
+                    report=report,
+                )
+
     if digest_issue is not None and _digest_due(
         ledger.read(digest_issue), end, timedelta(hours=digest_every_hours)
     ):
-        summary = metrics.collect(devin, deflections=deflections(), days=days, now=end)
+        summary = metrics.collect(devin, deflections=deflections(), days=days, now=end, acu_usd=acu_usd)
         ledger.append(
             digest_issue,
             "Automation metrics digest",
