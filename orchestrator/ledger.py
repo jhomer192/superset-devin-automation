@@ -54,8 +54,10 @@ def parse_entries(comments: list[dict[str, Any]]) -> list[LedgerEntry]:
 
 
 def render_comment(title: str, entry: LedgerEntry, lines: list[str]) -> str:
+    # Markdown table rows are passed through: a bullet in front of them stops GitHub rendering
+    # the table.
     body = [f"**{title}**", ""]
-    body.extend(f"- {line}" for line in lines)
+    body.extend(line if line.startswith("|") else f"- {line}" for line in lines)
     body.extend(["", entry.marker()])
     return "\n".join(body)
 
@@ -64,12 +66,22 @@ class IssueLedger:
     def __init__(self, gh: GitHubClient, repo: str) -> None:
         self._gh = gh
         self._repo = repo
+        # A thread is read several times per run (dedupe, regression guard, lineage). One ledger
+        # is built per run, so this cache lives exactly as long as the run and never goes stale
+        # against another writer.
+        self._entries: dict[int, list[LedgerEntry]] = {}
 
     def read(self, issue_number: int) -> list[LedgerEntry]:
-        return parse_entries(self._gh.list_issue_comments(self._repo, issue_number))
+        if issue_number not in self._entries:
+            self._entries[issue_number] = parse_entries(
+                self._gh.list_issue_comments(self._repo, issue_number)
+            )
+        return self._entries[issue_number]
 
     def append(self, issue_number: int, title: str, entry: LedgerEntry, lines: list[str]) -> LedgerEntry:
         self._gh.create_issue_comment(self._repo, issue_number, render_comment(title, entry, lines))
+        if issue_number in self._entries:
+            self._entries[issue_number].append(entry)
         return entry
 
 

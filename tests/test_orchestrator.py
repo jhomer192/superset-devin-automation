@@ -1,11 +1,12 @@
 import copy
 import json
-from datetime import UTC, datetime
+from collections import Counter
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 
-from orchestrator import automations, metrics, playbooks, prompts
+from orchestrator import automations, devin_api, metrics, playbooks, prompts
 from orchestrator.__main__ import cmd_simulate, count_deflections
 from orchestrator.config import load_settings
 from orchestrator.github_api import closing_issue_numbers
@@ -13,6 +14,8 @@ from orchestrator.ledger import IssueLedger, LedgerEntry, find, parse_entries
 from orchestrator.map_job import run_map
 from orchestrator.reduce_job import NotAMergedPR, extract_merged_pr, run_reduce
 from orchestrator.registry import load_registry
+from orchestrator.report_job import digest_lines, run_report
+from orchestrator.schema import FIX_SCHEMA
 from orchestrator.sessions import Liveness, classify, holds_slot, is_finished
 from orchestrator.simulate import FakeDevin, FakeGitHub, load_event
 from orchestrator.triage import Decision, Reason
@@ -298,6 +301,19 @@ def test_verify_settings_from_environment(monkeypatch):
         load_settings(simulate=True)
 
 
+def test_report_settings_from_environment(monkeypatch):
+    monkeypatch.delenv("REPORT_DIGEST_ISSUE", raising=False)
+    s = load_settings(simulate=True)
+    assert s.report_digest_issue is None and s.report_digest_every_hours == 24
+    monkeypatch.setenv("REPORT_DIGEST_ISSUE", "42")
+    monkeypatch.setenv("REPORT_DIGEST_EVERY_HOURS", "6")
+    s = load_settings(simulate=True)
+    assert s.report_digest_issue == 42 and s.report_digest_every_hours == 6
+    monkeypatch.setenv("REPORT_DIGEST_EVERY_HOURS", "0")
+    with pytest.raises(SystemExit):
+        load_settings(simulate=True)
+
+
 def test_reduce_automation_prompt_carries_cadence():
     payload = automations.reduce_payload(REPO, AUTO, "main", 5)
     prompt = payload["actions"][0]["prompt"]
@@ -544,7 +560,11 @@ def test_metrics_with_no_sessions_has_no_division_by_zero():
 
 
 def test_automation_payloads_validate_against_openapi_and_carry_no_ceilings():
-    for payload in (automations.map_payload(REPO, AUTO), automations.reduce_payload(REPO, AUTO)):
+    for payload in (
+        automations.map_payload(REPO, AUTO),
+        automations.reduce_payload(REPO, AUTO),
+        automations.report_payload(REPO, AUTO, 42),
+    ):
         assert automations.validate_payload(payload) == []
         automations.assert_no_ceilings(payload)
         assert payload["run_as"] == {"type": "organization"}
@@ -584,7 +604,19 @@ def test_register_is_idempotent_by_name():
     devin = FakeDevin()
     automations.register(devin, REPO, AUTO)
     automations.register(devin, REPO, AUTO)
-    assert len(devin.automations) == 2
+    assert len(devin.automations) == 3
+
+
+def test_report_automation_is_hourly_and_carries_the_digest_issue():
+    payload = automations.report_payload(REPO, AUTO, 42, digest_every_hours=6)
+    trigger = payload["triggers"][0]
+    assert trigger["event_type"] == "schedule:recurring"
+    assert trigger["conditions"]["any"][0]["all"] == [
+        {"field": "rrule", "operator": "recurrence", "value": "FREQ=HOURLY"}
+    ]
+    prompt = payload["actions"][0]["prompt"]
+    assert "REPORT_DIGEST_ISSUE=42" in prompt and "REPORT_DIGEST_EVERY_HOURS=6" in prompt
+    assert "REPORT_DIGEST_ISSUE" not in automations.report_payload(REPO, AUTO)["actions"][0]["prompt"]
 
 
 # --- whole loop --------------------------------------------------------------------------------
@@ -618,6 +650,169 @@ def test_count_deflections(registry, world):
     assert count_deflections(gh, registry, REPO) == 2
 
 
+# --- report ------------------------------------------------------------------------------------
+
+
+def do_report(devin, gh, *, digest_issue=None, now=None, digest_every_hours=24):
+    return run_report(
+        devin=devin,
+        gh=gh,
+        target_repo=REPO,
+        automation_repo=AUTO,
+        deflections=lambda: 0,
+        digest_issue=digest_issue,
+        digest_every_hours=digest_every_hours,
+        now=now,
+    )
+
+
+def test_report_publishes_each_finished_session_once(registry, world):
+    devin, gh = world
+    started = do_map(devin, gh, registry).started
+    by_issue = {s["issue"]: s["session_id"] for s in started}
+    devin.advance(by_issue[5], outcome="ok", acus=3.0, pr_url="https://github.com/jhomer192/superset/pull/14")
+    devin.advance(by_issue[10], outcome="error", acus=0.5)
+    devin.suspend(by_issue[11], "waiting_for_user")
+
+    report = do_report(devin, gh)
+    assert {(p["thread"], p["kind"]) for p in report.posted} == {(5, "fix"), (10, "fix")}
+    assert report.unfinished == 5 and report.already_reported == 0
+
+    bodies = {n: "\n".join(c["body"] for c in cs) for n, cs in gh.comments.items()}
+    assert "acceptance met" in bodies[5] and "ACUs: 3" in bodies[5]
+    assert "error: simulated failure before any probe ran" in bodies[10]
+    assert 11 not in {p["thread"] for p in report.posted}
+
+    assert do_report(devin, gh).posted == []
+
+
+def test_report_posts_verification_verdict_on_the_pr(registry, world):
+    devin, gh = world
+    session_id = do_reduce(devin, gh, registry).session_id
+    devin.advance(session_id, outcome="ok", acus=6.0)
+    posted = do_report(devin, gh).posted
+    assert posted == [{"thread": 14, "kind": "verify", "session_id": session_id}]
+    body = gh.comments[14][-1]["body"]
+    assert "Verification session finished: acceptance met" in body
+    assert "base exit 1, head exit 0" in body
+
+
+def test_report_flags_a_session_that_finished_without_structured_output(world):
+    devin, gh = world
+    session = devin.create_session({"prompt": "p", "tags": ["sda-fix", "issue-5"]})
+    devin.sessions[session["session_id"]]["status"] = "exit"
+    assert do_report(devin, gh).posted
+    assert "no structured output" in gh.comments[5][-1]["body"]
+
+
+def test_digest_is_appended_at_most_once_per_interval(world):
+    devin, gh = world
+    now = datetime(2026, 1, 31, 12, tzinfo=UTC)
+    assert do_report(devin, gh, digest_issue=1, now=now).digest_posted
+    assert not do_report(devin, gh, digest_issue=1, now=now + timedelta(hours=23)).digest_posted
+    assert do_report(devin, gh, digest_issue=1, now=now + timedelta(hours=25)).digest_posted
+    digests = [c for c in gh.comments[1] if "metrics digest" in c["body"]]
+    assert len(digests) == 2 and "| verification passed |" in digests[0]["body"]
+
+
+# --- self-healing regressions -------------------------------------------------------------------
+
+
+def fail_verification(devin, gh, registry):
+    """A merged PR whose verification finds a probe failing at HEAD."""
+    session_id = do_reduce(devin, gh, registry).session_id
+    devin.advance(session_id, outcome="failed", acus=5.0)
+    return session_id
+
+
+def test_failed_verification_files_an_issue_and_starts_its_fix(registry, world):
+    devin, gh = world
+    session_id = fail_verification(devin, gh, registry)
+
+    filed = do_report(devin, gh).regressions_filed
+    assert len(filed) == 1
+    entry = filed[0]
+    assert entry["pr"] == 14 and entry["probes"] == ["issue_5/unit"] and entry["depth"] == 1
+
+    issue = gh.issues[entry["issue"]]
+    assert {label["name"] for label in issue["labels"]} == {"regression", "automation"}
+    assert "pull/14" in issue["body"] and "simulated pytest summary" in issue["body"]
+    assert session_id in issue["body"]
+
+    fix = devin.sessions[entry["session_id"]]
+    assert set(fix["tags"]) == {"sda-fix", "sda-regression", f"issue-{entry['issue']}"}
+    assert fix["structured_output_schema"]["title"] == "SupersetFixResult"
+    assert f"#{entry['issue']}" in fix["prompt"] and "issue_5/unit" in fix["prompt"]
+    assert "Closes #" in fix["prompt"]
+
+
+def test_a_failure_is_only_filed_once(registry, world):
+    devin, gh = world
+    fail_verification(devin, gh, registry)
+    first = do_report(devin, gh)
+    assert do_report(devin, gh).regressions_filed == []
+    assert len(gh.issues) == len({i["number"] for i in gh.issues.values()})
+    assert find(IssueLedger(gh, REPO).read(14), "regression_filed", issue=first.regressions_filed[0]["issue"])
+
+
+def test_a_regression_chain_stops_after_two_automated_attempts(registry, world):
+    devin, gh = world
+    fail_verification(devin, gh, registry)
+    issue = do_report(devin, gh).regressions_filed[0]["issue"]
+
+    # The fix for that issue lands and regresses again, twice.
+    depths = []
+    for pr_number in (101, 102):
+        pr = gh.merge(
+            pr_number,
+            branch="master",
+            sha=f"{pr_number:040x}",
+            title=f"fix: attempt {pr_number}",
+            body=f"Closes #{issue}",
+        )
+        devin.advance(
+            do_reduce(devin, gh, registry, event={**load_event(), "pull_request": pr}).session_id,
+            outcome="failed",
+            acus=1.0,
+        )
+        report = do_report(devin, gh)
+        depths.append(report)
+        issue = report.regressions_filed[0]["issue"] if report.regressions_filed else issue
+
+    assert depths[0].regressions_filed[0]["depth"] == 2 and depths[0].escalated == []
+    assert depths[1].regressions_filed == []
+    assert [(e["pr"], e["depth"]) for e in depths[1].escalated] == [(102, 3)]
+    assert "a human needs to look at it" in gh.comments[102][-1]["body"]
+
+
+def test_an_errored_verification_is_reported_but_not_filed_as_a_regression(registry, world):
+    devin, gh = world
+    devin.advance(do_reduce(devin, gh, registry).session_id, outcome="error", acus=0.2)
+    report = do_report(devin, gh)
+    assert report.posted and report.regressions_filed == []
+
+
+def test_metrics_track_regression_issues_and_their_prs(registry, world):
+    devin, gh = world
+    fail_verification(devin, gh, registry)
+    filed = do_report(devin, gh).regressions_filed[0]
+    devin.advance(filed["session_id"], outcome="ok", acus=2.0, pr_url="https://github.com/x/y/pull/7")
+
+    summary = metrics.collect(devin, deflections=0, days=30, acu_usd=2.5)
+    assert summary.regression_issues == 1 and summary.regression_fix_prs == 1
+    assert summary.regressions[0]["issue"] == filed["issue"]
+    assert summary.regressions[0]["pr_url"] == "https://github.com/x/y/pull/7"
+    assert summary.estimated_cost_usd == round(summary.total_acus * 2.5, 2)
+    assert summary.org_total_acus is not None and summary.pr_metrics["prs_merged_count"] == 1
+
+
+def test_cost_is_omitted_when_no_rate_is_configured(world):
+    devin, _ = world
+    summary = metrics.collect(devin, deflections=0, days=30)
+    assert summary.estimated_cost_usd is None
+    assert any("ACUs, not money" in limitation for limitation in summary.limitations)
+
+
 # --- verify/collect ---------------------------------------------------------------------------
 
 
@@ -638,3 +833,185 @@ def test_collect_requires_base_failure_for_closed_issues_only(tmp_path):
     rows[0]["exit_code"] = 2
     assert build_results(rows, closed={5}, regression=set())[0]["acceptance_met"] is False
     assert build_results(rows[:1], closed={5}, regression=set())[0]["base_exit_code"] is None
+
+
+# --- API cost of a run ---------------------------------------------------------------------------
+
+
+class CountingDevin:
+    """A FakeDevin that tallies its calls, so what a run costs in requests is measurable."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.calls = Counter()
+
+    def create_session(self, body):
+        self.calls["create_session"] += 1
+        return self.inner.create_session(body)
+
+    def get_session(self, session_id):
+        self.calls["get_session"] += 1
+        return self.inner.get_session(session_id)
+
+    def list_sessions(self, **params):
+        self.calls["list_sessions"] += 1
+        return self.inner.list_sessions(**params)
+
+    def session_metrics(self, time_after, time_before):
+        self.calls["session_metrics"] += 1
+        return self.inner.session_metrics(time_after, time_before)
+
+    def pr_metrics(self, time_after, time_before):
+        self.calls["pr_metrics"] += 1
+        return self.inner.pr_metrics(time_after, time_before)
+
+    def session_consumption(self, session_id):
+        self.calls["session_consumption"] += 1
+        return self.inner.session_consumption(session_id)
+
+    def org_consumption(self, time_after, time_before):
+        self.calls["org_consumption"] += 1
+        return self.inner.org_consumption(time_after, time_before)
+
+
+class CountingGitHub:
+    def __init__(self, inner):
+        self.inner = inner
+        self.calls = Counter()
+
+    def list_issues(self, repo, labels, state="open"):
+        self.calls["list_issues"] += 1
+        return self.inner.list_issues(repo, labels, state)
+
+    def get_issue(self, repo, number):
+        self.calls["get_issue"] += 1
+        return self.inner.get_issue(repo, number)
+
+    def create_issue(self, repo, title, body, labels):
+        self.calls["create_issue"] += 1
+        return self.inner.create_issue(repo, title, body, labels)
+
+    def list_issue_comments(self, repo, number):
+        self.calls["list_issue_comments"] += 1
+        return self.inner.list_issue_comments(repo, number)
+
+    def create_issue_comment(self, repo, number, body):
+        self.calls["create_issue_comment"] += 1
+        return self.inner.create_issue_comment(repo, number, body)
+
+    def list_pulls(self, repo, state="open"):
+        self.calls["list_pulls"] += 1
+        return self.inner.list_pulls(repo, state)
+
+    def get_pull(self, repo, number):
+        self.calls["get_pull"] += 1
+        return self.inner.get_pull(repo, number)
+
+    def list_merged_pulls(self, repo, base_branch):
+        self.calls["list_merged_pulls"] += 1
+        return self.inner.list_merged_pulls(repo, base_branch)
+
+    def get_commit_parents(self, repo, sha):
+        self.calls["get_commit_parents"] += 1
+        return self.inner.get_commit_parents(repo, sha)
+
+
+def finished_report_session(devin, *, acus):
+    """What REPORT's own hourly session looks like once it has run."""
+    session = devin.create_session({"prompt": "p", "tags": ["sda-report"]})
+    devin.sessions[session["session_id"]].update({"status": "exit", "acus_consumed": acus})
+    return session
+
+
+def finished_world(registry, world):
+    """The fixture world after a MAP sweep whose sessions have all finished."""
+    devin, gh = world
+    started = do_map(devin, gh, registry).started
+    for i, session in enumerate(started):
+        devin.advance(
+            session["session_id"],
+            outcome="ok",
+            acus=float(i + 1),
+            pr_url=f"https://github.com/jhomer192/superset/pull/{200 + i}",
+        )
+    return devin, gh
+
+
+def test_a_steady_state_report_run_costs_nothing_in_consumption(registry, world):
+    devin, gh = world
+    devin, gh = finished_world(registry, (devin, gh))
+    now = datetime(2026, 1, 31, 12, tzinfo=UTC)
+
+    first_devin, first_gh = CountingDevin(devin), CountingGitHub(gh)
+    assert do_report(first_devin, first_gh, digest_issue=1, now=now).posted
+    # One consumption lookup per session reported, reused by the digest rather than repeated.
+    sessions = len(devin.sessions)
+    assert first_devin.calls["session_consumption"] == sessions
+    assert first_devin.calls["list_sessions"] == 2  # the loop's sessions, then REPORT's own
+
+    steady_devin, steady_gh = CountingDevin(devin), CountingGitHub(gh)
+    steady = do_report(steady_devin, steady_gh, digest_issue=1, now=now + timedelta(hours=1))
+    assert steady.posted == [] and not steady.digest_posted
+    assert steady_devin.calls["session_consumption"] == 0
+    assert steady_gh.calls["create_issue_comment"] == 0
+    # Each thread is listed once per run, not once per check.
+    assert steady_gh.calls["list_issue_comments"] == sessions
+
+
+def test_report_reads_more_than_one_page_of_sessions(registry, world):
+    devin, gh = world
+    for _ in range(150):
+        session = devin.create_session(
+            {"prompt": "p", "tags": ["sda-fix", "issue-5"], "structured_output_schema": FIX_SCHEMA}
+        )
+        devin.advance(session["session_id"], outcome="ok", acus=1.0)
+    noise = finished_report_session(devin, acus=0.4)
+
+    report = do_report(devin, gh, digest_issue=1, now=datetime(2026, 1, 31, 12, tzinfo=UTC))
+    assert len(report.posted) == 150
+    assert noise["session_id"] not in "\n".join(c["body"] for c in gh.comments[5])
+
+
+def test_report_prices_its_own_polling_separately(registry, world):
+    devin, gh = world
+    devin, gh = finished_world(registry, (devin, gh))
+    finished_report_session(devin, acus=0.4)
+
+    summary = metrics.collect(devin, deflections=0, days=30)
+    assert summary.polling_acus == 0.4
+    loop = devin.list_sessions(tags=[metrics.FIX_TAG, metrics.VERIFY_TAG])
+    assert all(metrics.REPORT_TAG not in s["tags"] for s in loop)
+    body = "\n".join(digest_lines(summary))
+    assert "| ACUs polling (REPORT itself) | 0.4 |" in body
+    assert "{" not in body and "None" not in body
+
+
+def test_digest_prints_n_a_rather_than_none(world):
+    devin, _ = world
+    body = "\n".join(digest_lines(metrics.collect(devin, deflections=0, days=30)))
+    assert "| merge rate n/a" in body or "(merge rate n/a)" in body
+    assert "| ACUs per session | n/a |" in body and "None" not in body
+
+
+def test_live_client_follows_the_session_cursor(monkeypatch):
+    pages = [
+        {
+            "items": [{"session_id": f"devin-{i}"} for i in range(devin_api.MAX_PAGE)],
+            "has_next_page": True,
+            "end_cursor": "cursor-2",
+        },
+        {"items": [{"session_id": "devin-tail"}], "has_next_page": False, "end_cursor": None},
+    ]
+    seen = []
+
+    def fake_request(method, url, *, headers=None, params=None, body=None):
+        seen.append(dict(params or {}))
+        return pages[len(seen) - 1]
+
+    monkeypatch.setattr(devin_api, "request_json", fake_request)
+    client = devin_api.LiveDevinClient("https://api.devin.ai", "key", "org-1")
+    sessions = client.list_sessions(origins="automation", tags=["sda-fix", "sda-verify"])
+
+    assert len(sessions) == devin_api.MAX_PAGE + 1
+    assert seen[0]["first"] == 200 and seen[0]["tags"] == ["sda-fix", "sda-verify"]
+    assert "after" not in seen[0] and seen[1]["after"] == "cursor-2"

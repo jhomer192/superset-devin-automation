@@ -58,7 +58,12 @@ class FakeDevin:
 
     def list_sessions(self, **params: Any) -> list[JSON]:
         origins = params.get("origins")
-        return [dict(s) for s in self.sessions.values() if not origins or s["origin"] == origins]
+        tags = {str(t) for t in params.get("tags") or []}
+        return [
+            dict(s)
+            for s in self.sessions.values()
+            if (not origins or s["origin"] == origins) and (not tags or tags & set(s["tags"]))
+        ]
 
     def list_automations(self) -> list[JSON]:
         return [dict(a) for a in self.automations.values()]
@@ -94,8 +99,18 @@ class FakeDevin:
             "avg_acus_per_session": round(sum(acus) / len(acus), 3) if acus else 0.0,
         }
 
-    def sessions_insights(self, **params: Any) -> list[JSON]:
-        return [{"session_id": s["session_id"], "status": s["status"]} for s in self.sessions.values()]
+    def pr_metrics(self, time_after: int, time_before: int) -> JSON:
+        prs = [pr for s in self.sessions.values() for pr in s["pull_requests"]]
+        states = [p.get("pr_state") for p in prs]
+        return {
+            "prs_created_count": len(prs),
+            "prs_opened_count": states.count("open"),
+            "prs_merged_count": states.count("merged"),
+            "prs_closed_count": states.count("closed"),
+        }
+
+    def org_consumption(self, time_after: int, time_before: int) -> JSON:
+        return {"total_acus": round(sum(self.consumption.values()), 3), "consumption_by_date": []}
 
     def session_consumption(self, session_id: str) -> JSON:
         return {"session_id": session_id, "total_acus": self.consumption.get(session_id, 0.0)}
@@ -229,6 +244,18 @@ class FakeGitHub:
     def get_issue(self, repo: str, number: int) -> JSON:
         return dict(self.issues[number])
 
+    def create_issue(self, repo: str, title: str, body: str, labels: list[str]) -> JSON:
+        number = max([*self.issues, *self.pulls], default=0) + 1
+        self.issues[number] = {
+            "number": number,
+            "title": title,
+            "body": body,
+            "state": "open",
+            "labels": [{"name": name} for name in labels],
+            "html_url": f"https://github.com/{repo}/issues/{number}",
+        }
+        return dict(self.issues[number])
+
     def list_issue_comments(self, repo: str, number: int) -> list[JSON]:
         return [dict(c) for c in self.comments.get(number, [])]
 
@@ -248,9 +275,6 @@ class FakeGitHub:
         return merged_in_order(
             [dict(p) for p in self.pulls.values() if (p.get("base") or {}).get("ref") == base_branch]
         )
-
-    def get_branch_sha(self, repo: str, branch: str) -> str:
-        return self.branch_heads[branch]
 
     def get_commit_parents(self, repo: str, sha: str) -> list[str]:
         return list(self.parents.get(sha, []))

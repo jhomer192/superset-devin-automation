@@ -1,4 +1,4 @@
-"""CLI: python -m orchestrator {map,reduce,metrics,register,register-playbooks,simulate} [--simulate]"""
+"""CLI: python -m orchestrator {map,reduce,report,metrics,register,register-playbooks,simulate}"""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from .ledger import IssueLedger, find
 from .map_job import run_map
 from .reduce_job import run_reduce
 from .registry import Registry, load_registry
+from .report_job import run_report
 from .simulate import FakeDevin, FakeGitHub, load_event, pr_number
 
 log = logging.getLogger("orchestrator")
@@ -78,7 +79,26 @@ def cmd_metrics(
     settings: Settings, devin: DevinClient, gh: GitHubClient, registry: Registry, days: int
 ) -> dict[str, Any]:
     return metrics.collect(
-        devin, deflections=count_deflections(gh, registry, settings.target_repo), days=days
+        devin,
+        deflections=count_deflections(gh, registry, settings.target_repo),
+        days=days,
+        acu_usd=settings.acu_usd,
+    ).as_dict()
+
+
+def cmd_report(
+    settings: Settings, devin: DevinClient, gh: GitHubClient, registry: Registry, days: int
+) -> dict[str, Any]:
+    return run_report(
+        devin=devin,
+        gh=gh,
+        target_repo=settings.target_repo,
+        automation_repo=settings.automation_repo,
+        deflections=lambda: count_deflections(gh, registry, settings.target_repo),
+        days=days,
+        digest_issue=settings.report_digest_issue,
+        digest_every_hours=settings.report_digest_every_hours,
+        acu_usd=settings.acu_usd,
     ).as_dict()
 
 
@@ -91,6 +111,8 @@ def cmd_register(settings: Settings, devin: DevinClient, dry_run: bool) -> list[
         every_n=settings.verify_every_n_merges,
         playbook_id_fix=settings.playbook_id_fix,
         playbook_id_verify=settings.playbook_id_verify,
+        digest_issue=settings.report_digest_issue,
+        digest_every_hours=settings.report_digest_every_hours,
         dry_run=dry_run,
     )
 
@@ -102,7 +124,7 @@ def cmd_register_playbooks(devin: DevinClient, dry_run: bool) -> dict[str, Any]:
 
 
 def cmd_simulate(settings: Settings, registry: Registry) -> dict[str, Any]:
-    """The whole loop, offline: Friday MAP, a fix landing, REDUCE on the merge, metrics.
+    """The whole loop, offline: Friday MAP, a fix landing, REDUCE on the merge, REPORT, metrics.
 
     Everything printed here is produced by the same code paths the live automations run; only
     the Devin and GitHub clients are in-memory doubles.
@@ -154,6 +176,23 @@ def cmd_simulate(settings: Settings, registry: Registry) -> dict[str, Any]:
     devin.advance(verify_sid, outcome="ok", acus=6.1)
     out["verification_structured_output"] = devin.get_session(verify_sid)["structured_output"]
 
+    # REPORT publishes every finished session's verdict; #1 stands in for the digest tracking issue.
+    reporting = replace(settings, report_digest_issue=1)
+    out["report"] = cmd_report(reporting, devin, gh, registry, days=30)
+    out["report_rerun_is_idempotent"] = cmd_report(reporting, devin, gh, registry, days=30)
+
+    # A later merge regresses: verification fails, so REPORT files an issue and starts its fix.
+    # The fillers put the regressing merge on a window boundary whatever the cadence is.
+    for i in range(1, n):
+        filler = gh.merge(940 + i, branch=branch, sha=f"{940 + i:040x}", title=f"chore: merge {i}")
+        cmd_reduce(settings, devin, gh, registry, None, event={**event, "pull_request": filler})
+    bad = gh.merge(950, branch=branch, sha=f"{950:040x}", title="feat: a change that regresses")
+    bad_event = {**event, "number": bad["number"], "pull_request": bad}
+    out["regressing_merge_reduce"] = cmd_reduce(settings, devin, gh, registry, None, event=bad_event)
+    devin.advance(out["regressing_merge_reduce"]["session_id"], outcome="failed", acus=5.5)
+    out["report_files_regression"] = cmd_report(reporting, devin, gh, registry, days=30)
+    out["report_files_regression_once"] = cmd_report(reporting, devin, gh, registry, days=30)
+
     out["friday_2_map"] = cmd_map(settings, devin, gh, registry)
     out["metrics"] = cmd_metrics(settings, devin, gh, registry, days=30)
     out["automations_dry_run"] = [
@@ -192,6 +231,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("map", help="Friday sweep: triage ready issues, start fix sessions")
     p_reduce = sub.add_parser("reduce", help="merged-PR event: start one verification session")
     p_reduce.add_argument("--event-json", type=Path, default=None)
+    p_report = sub.add_parser("report", help="publish finished session outcomes to GitHub")
+    p_report.add_argument("--days", type=int, default=30)
     p_metrics = sub.add_parser("metrics", help="observability report")
     p_metrics.add_argument("--days", type=int, default=30)
     p_reg = sub.add_parser("register", help="create/update the MAP and REDUCE automations")
@@ -221,6 +262,8 @@ def main(argv: list[str] | None = None) -> int:
             result = cmd_map(settings, devin, gh, registry)
         elif args.command == "reduce":
             result = cmd_reduce(settings, devin, gh, registry, args.event_json)
+        elif args.command == "report":
+            result = cmd_report(settings, devin, gh, registry, args.days)
         elif args.command == "metrics":
             result = cmd_metrics(settings, devin, gh, registry, args.days)
         elif args.command == "register-playbooks":
