@@ -1022,6 +1022,22 @@ def test_finder_verifies_fixes_every_recent_regression_waits_and_reports(registr
     assert find(IssueLedger(gh, REPO).read(out.status_issue), "run_reported", stage="find-and-fix")
 
 
+def test_finder_fixes_the_issue_it_just_filed_even_when_the_label_listing_lags(registry, world):
+    devin, gh = world
+    real_list = gh.list_issues
+    listed_before = {n for n in gh.issues}
+
+    def lagging_list(repo, labels, state="open"):
+        return [i for i in real_list(repo, labels, state) if i["number"] in listed_before]
+
+    gh.list_issues = lagging_list
+    out = do_finder(devin, gh, registry)
+    issue = out.testing["regression_filed"]["issue"]
+    assert issue not in listed_before and out.candidates == [issue]
+    (finished,) = out.fixes["finished"]
+    assert finished["issue"] == issue
+
+
 def test_finder_replay_starts_nothing_new_and_reports_once(registry, world):
     devin, gh = world
     first = do_finder(devin, gh, registry)

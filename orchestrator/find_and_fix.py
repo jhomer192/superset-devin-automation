@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -52,12 +52,24 @@ def _opened_at(issue: dict[str, Any]) -> datetime | None:
 
 
 def recent_regression_issues(
-    gh: GitHubClient, target_repo: str, hours: int, now: datetime | None = None
+    gh: GitHubClient,
+    target_repo: str,
+    hours: int,
+    now: datetime | None = None,
+    include: Iterable[int] = (),
 ) -> list[dict[str, Any]]:
-    """Open `sda-regression` issues created within the window, oldest first."""
+    """Open `sda-regression` issues created within the window, oldest first.
+
+    `include` names issues that must be in the result even if the label listing does not
+    return them yet (GitHub's list lags a just-created issue by a few seconds).
+    """
     cutoff = (now or datetime.now(UTC)) - timedelta(hours=hours)
     issues = gh.list_issues(target_repo, labels=REGRESSION_LABEL, state="open")
-    recent = [i for i in issues if (opened := _opened_at(i)) is not None and opened >= cutoff]
+    by_number = {int(i["number"]): i for i in issues}
+    for number in include:
+        if number not in by_number:
+            by_number[number] = gh.get_issue(target_repo, number)
+    recent = [i for i in by_number.values() if (opened := _opened_at(i)) is not None and opened >= cutoff]
     return sorted(recent, key=lambda i: int(i["number"]))
 
 
@@ -71,10 +83,11 @@ def fix_recent_regressions(
     wait: bool,
     sleep: Callable[[float], None],
     now: datetime | None = None,
+    include: Iterable[int] = (),
 ) -> tuple[list[int], AutoprReport]:
     report = AutoprReport(trigger="find-and-fix")
     ledger = IssueLedger(gh, target_repo)
-    issues = recent_regression_issues(gh, target_repo, hours, now)
+    issues = recent_regression_issues(gh, target_repo, hours, now, include)
     report.scanned = len(issues)
     open_prs = gh.list_pulls(target_repo, state="open")
     for issue in issues:
@@ -139,6 +152,7 @@ def run_find_and_fix(
     report.testing = testing.as_dict()
     if not wait:
         return report
+    filed = testing.regression_filed or {}
     report.candidates, fixes = fix_recent_regressions(
         devin=devin,
         gh=gh,
@@ -148,12 +162,12 @@ def run_find_and_fix(
         wait=True,
         sleep=sleep,
         now=now,
+        include=[int(filed["issue"])] if filed.get("issue") else (),
     )
     report.fixes = fixes.as_dict()
     # keyed by the verification alone: a replayed find-and-fix for the same merge reports nothing twice
     session_ids = [testing.session_id] if testing.session_id else []
     verdict = testing.verdict or testing.skipped_reason or "no verification this merge"
-    filed = testing.regression_filed or {}
     lines = [
         f"verification: {verdict}"
         + (f", session `{testing.session_id}`" if testing.session_id else "")
