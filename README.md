@@ -20,6 +20,26 @@ allowing `git-manager.devin.ai`. The exact payloads are built in
 `orchestrator/automations.py` and validated against the OpenAPI components vendored in
 `orchestrator/v3_schemas.json` before anything is sent.
 
+The sessions those shims start reference two org Playbooks, which carry the part of each
+prompt that is the same on every run:
+
+| Playbook | Body (`orchestrator/prompts.py`) | Attached schema | Used by |
+|----------|----------------------------------|-----------------|---------|
+| `superset-devin-automation: remediation` | `FIX_PLAYBOOK_BODY`: clone at master, branch, venv from `requirements/development.txt`, run every deciding probe and require non-zero at base, minimal fix following the fork's `AGENTS.md`, re-run probes and require 0, PR body with `Closes #NN`, Conventional Commits title, no AI attribution | `FIX_SCHEMA` | fix sessions started by MAP |
+| `superset-devin-automation: verification` | `VERIFY_PLAYBOOK_BODY`: clone this repo, run `verify/run_all.sh` with the given repo/head/base/issues, copy the resulting verify/out/result.json into the structured output verbatim, never modify `probes/` or `verify/`, no PR | `VERIFICATION_SCHEMA` | verification sessions started by REDUCE |
+
+The per-session prompt is then only the variables: the `@owner/repo` token, the
+`@playbook:{id}` token, and the issue number/title/condition/URL and probe list (fix) or the
+HEAD/BASE SHAs, PR URL, issue numbers and probe list (verification). `playbook_id` on a
+session is read-only; the API derives it from the token, exactly as `repos` is derived from
+`@owner/repo`. If `PLAYBOOK_ID_FIX` or `PLAYBOOK_ID_VERIFY` is unset, the same body is inlined
+into the prompt and a warning is logged; a missing playbook never stops MAP or REDUCE.
+
+The regression fix prompt (`regression_fix_prompt` in `orchestrator/prompts.py`) stays fully
+inline and carries no playbook token: its workflow differs from `FIX_PLAYBOOK_BODY` (reproduce
+the failure first, add a regression test, re-run the surrounding unit-test directory), so the
+remediation playbook would contradict it.
+
 ## Run it
 
 ### Offline, no keys (`simulate`)
@@ -47,6 +67,9 @@ pip install -e . && python -m orchestrator simulate
    issue is retried; the merged issue is gone from the `ready` list.
 6. **Metrics** are computed over the fake sessions, and the automation payloads are
    dry-run validated.
+7. **Playbooks** are registered into the fake org twice (same two ids both times), and one more
+   MAP with those ids shows every fix prompt carrying the `@playbook:` token; the earlier steps
+   ran with the ids unset, exercising the inline fallback.
 
 Every structured output the fakes emit is validated against the same schemas live sessions
 get (`orchestrator/schema.py`), so the simulation cannot pass with a payload a real session
@@ -56,8 +79,11 @@ would be rejected for.
 
 ```bash
 cp .env.example .env         # fill DEVIN_API_KEY, DEVIN_ORG_ID, GITHUB_TOKEN, VERIFY_BRANCH, VERIFY_EVERY_N_MERGES
-docker compose run --rm orchestrator register --dry-run   # print validated payloads
-docker compose run --rm orchestrator register             # create/update the automations
+docker compose run --rm orchestrator register-playbooks --dry-run   # print validated playbook payloads
+docker compose run --rm orchestrator register-playbooks   # create/update both playbooks; prints PLAYBOOK_ID_*
+# put the printed PLAYBOOK_ID_FIX / PLAYBOOK_ID_VERIFY in .env, then:
+docker compose run --rm orchestrator register --dry-run   # print validated automation payloads
+docker compose run --rm orchestrator register             # create/update both automations (shims carry the ids)
 docker compose run --rm orchestrator map                  # what Friday would do, right now
 docker compose run --rm orchestrator reduce --event-json /events/pr.json
 docker compose run --rm orchestrator report --days 30
@@ -66,8 +92,9 @@ docker compose run --rm orchestrator metrics --days 30
 
 Inside a Devin session the same values are available as the org secret
 `superset_remediation_bot` (Devin API key, service user `superset-remediation-bot`) and the
-personal secret `superset_github_key` (GitHub PAT for `jhomer192`). `register` is idempotent:
-it updates the automations by name rather than creating duplicates.
+personal secret `superset_github_key` (GitHub PAT for `jhomer192`). `register` and
+`register-playbooks` are idempotent: they update by automation name / playbook title
+(`PUT`) rather than creating duplicates.
 
 Secrets come from environment variables only; `.env.example` ships with empty values and
 `.env` is git-ignored. `orchestrator/config.py` is the complete list of settings.
@@ -166,6 +193,17 @@ taxonomy is machine-enforced with `if/then/else`: when `status == "error"` the p
 carry `error_message` and must **not** carry `acceptance_met`; otherwise `acceptance_met`,
 `probe_command`, `probe_exit_code` and `evidence` are all required. `tests/test_schema.py`
 executes both schemas against passing and failing payloads.
+
+## API surface
+
+Every v3 endpoint this loop calls, all under `/v3/organizations/{org_id}` (`orchestrator/devin_api.py`):
+
+| Endpoint | Used for |
+|----------|----------|
+| `POST /sessions`, `GET /sessions/{id}`, `GET /sessions` | start fix/verification sessions, dedup on live sessions |
+| `GET /automations`, `POST /automations`, `PUT /automations/{id}` | `register` (idempotent by name) |
+| `GET /playbooks`, `POST /playbooks`, `PUT /playbooks/{id}` | `register-playbooks` (idempotent by title); payload is `PlaybookCreateRequest` |
+| `GET /metrics/sessions`, `GET /sessions/insights`, `GET /consumption/daily/sessions/{id}` | `metrics` |
 
 ## Observability
 

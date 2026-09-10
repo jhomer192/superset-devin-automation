@@ -21,6 +21,8 @@ class Settings:
     ready_label: str
     verify_branch: str
     verify_every_n_merges: int
+    playbook_id_fix: str | None
+    playbook_id_verify: str | None
     report_digest_issue: int | None
     report_digest_every_hours: int
     acu_usd: float | None
@@ -74,6 +76,8 @@ def load_settings(simulate: bool = False) -> Settings:
         ready_label=env.get("READY_LABEL", "ready"),
         verify_branch=env.get("VERIFY_BRANCH", "master"),
         verify_every_n_merges=every,
+        playbook_id_fix=env.get("PLAYBOOK_ID_FIX") or None,
+        playbook_id_verify=env.get("PLAYBOOK_ID_VERIFY") or None,
         report_digest_issue=int(digest_issue) if digest_issue else None,
         report_digest_every_hours=digest_hours,
         acu_usd=float(rate) if rate else None,

@@ -24,6 +24,7 @@ JSON = dict[str, Any]
 class FakeDevin:
     sessions: dict[str, JSON] = field(default_factory=dict)
     automations: dict[str, JSON] = field(default_factory=dict)
+    playbooks: dict[str, JSON] = field(default_factory=dict)
     consumption: dict[str, float] = field(default_factory=dict)
     _n: int = 0
 
@@ -75,6 +76,18 @@ class FakeDevin:
     def update_automation(self, automation_id: str, body: JSON) -> JSON:
         self.automations[automation_id].update(body)
         return dict(self.automations[automation_id])
+
+    def list_playbooks(self) -> list[JSON]:
+        return [dict(p) for p in self.playbooks.values()]
+
+    def create_playbook(self, body: JSON) -> JSON:
+        pid = self._next("playbook-sim")
+        self.playbooks[pid] = {"playbook_id": pid, **body}
+        return dict(self.playbooks[pid])
+
+    def update_playbook(self, playbook_id: str, body: JSON) -> JSON:
+        self.playbooks[playbook_id].update(body)
+        return dict(self.playbooks[playbook_id])
 
     def session_metrics(self, time_after: int, time_before: int) -> JSON:
         sessions = list(self.sessions.values())

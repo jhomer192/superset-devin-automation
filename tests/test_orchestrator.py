@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from orchestrator import automations, devin_api, metrics
+from orchestrator import automations, devin_api, metrics, playbooks, prompts
 from orchestrator.__main__ import cmd_simulate, count_deflections
 from orchestrator.config import load_settings
 from orchestrator.github_api import closing_issue_numbers
@@ -322,6 +322,129 @@ def test_reduce_automation_prompt_carries_cadence():
     assert automations.validate_payload(payload) == []
     # the trigger itself is unchanged: it still fires on every merged PR, the counter is in code
     assert payload["triggers"] == automations.reduce_payload(REPO, AUTO)["triggers"]
+
+
+# --- playbooks --------------------------------------------------------------------------------
+
+
+def test_playbook_payloads_validate_against_vendored_schema():
+    titles = [p["title"] for p in playbooks.payloads()]
+    assert titles == [playbooks.FIX_TITLE, playbooks.VERIFY_TITLE]
+    for payload in playbooks.payloads():
+        assert automations.validate_payload(payload, "PlaybookCreateRequest") == []
+        assert len(json.dumps(payload["structured_output_schema"])) < 64 * 1024
+        assert "$ref" not in json.dumps(payload["structured_output_schema"])
+        assert "max_acu" not in payload["body"] and "timeout" not in payload["body"].lower()
+    assert automations.validate_payload({"title": "x"}, "PlaybookCreateRequest") != []
+
+
+def test_playbook_bodies_keep_the_invariants():
+    fix, verify = playbooks.fix_playbook()["body"], playbooks.verify_playbook()["body"]
+    for needle in (
+        "requirements/development.txt",
+        "non-zero",
+        "exit 0",
+        "AGENTS.md",
+        "Closes #",
+        "Co-Auth" + "ored-By",
+    ):
+        assert needle in fix, needle
+    for needle in (
+        "verify/run_all.sh",
+        "MUST FAIL at BASE",
+        "result.json",
+        "verbatim",
+        "probes/",
+        "error_message",
+    ):
+        assert needle in verify, needle
+
+
+def test_register_playbooks_is_idempotent_by_title():
+    devin = FakeDevin()
+    dry = playbooks.register(devin, dry_run=True)
+    assert all(r["dry_run"] for r in dry) and devin.list_playbooks() == []
+    first = playbooks.register(devin)
+    second = playbooks.register(devin)
+    assert len(devin.list_playbooks()) == 2
+    assert [r["playbook_id"] for r in first] == [r["playbook_id"] for r in second]
+    ids = playbooks.lookup_ids(devin)
+    assert ids["PLAYBOOK_ID_FIX"] == first[0]["playbook_id"]
+    assert ids["PLAYBOOK_ID_VERIFY"] == first[1]["playbook_id"]
+
+
+def test_prompts_carry_playbook_token_or_fall_back_inline(registry):
+    spec = registry.by_number(5)
+    issue = {"number": 5, "html_url": f"https://github.com/{REPO}/issues/5"}
+    with_pb = prompts.fix_session_prompt(REPO, AUTO, issue, spec, "pb-fix")
+    inline = prompts.fix_session_prompt(REPO, AUTO, issue, spec)
+    assert with_pb.startswith(f"@{REPO} @playbook:pb-fix\n")
+    assert "requirements/development.txt" not in with_pb and "issue_5/unit" in with_pb
+    assert "@playbook:" not in inline and prompts.FIX_PLAYBOOK_BODY in inline
+
+    probes = registry.probes_for([5])
+    with_pb = prompts.verification_prompt(
+        REPO, AUTO, "h" * 40, "b" * 40, "https://x/pr/1", [5], probes, "pb-v"
+    )
+    inline = prompts.verification_prompt(REPO, AUTO, "h" * 40, "b" * 40, "https://x/pr/1", [5], probes)
+    assert "@playbook:pb-v" in with_pb and "--head " + "h" * 40 in with_pb and "npm ci" not in with_pb
+    assert "@playbook:" not in inline and prompts.VERIFY_PLAYBOOK_BODY in inline
+
+
+def test_map_and_reduce_run_with_and_without_playbook_ids(registry, world, caplog):
+    devin, gh = world
+    with caplog.at_level("WARNING"):
+        report = do_map(devin, gh, registry)
+    assert report.started and "PLAYBOOK_ID_FIX unset" in caplog.text
+    assert all("@playbook:" not in s["prompt"] for s in devin.sessions.values())
+
+    devin2, gh2 = FakeDevin(), FakeGitHub.from_fixtures()
+    run_map(
+        devin=devin2,
+        gh=gh2,
+        registry=registry,
+        target_repo=REPO,
+        automation_repo=AUTO,
+        ready_label="ready",
+        playbook_id="pb-fix",
+    )
+    assert devin2.sessions and all("@playbook:pb-fix" in s["prompt"] for s in devin2.sessions.values())
+    assert all(s["structured_output_schema"] is not None for s in devin2.sessions.values())
+
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        r = do_reduce(devin2, gh2, registry)
+    assert r.session_id and "PLAYBOOK_ID_VERIFY unset" in caplog.text
+    r2 = run_reduce(
+        devin=FakeDevin(),
+        gh=FakeGitHub.from_fixtures(),
+        registry=registry,
+        target_repo=REPO,
+        automation_repo=AUTO,
+        event=load_event(),
+        playbook_id="pb-v",
+    )
+    assert r2.session_id is not None
+
+
+def test_playbook_settings_from_environment(monkeypatch):
+    monkeypatch.delenv("PLAYBOOK_ID_FIX", raising=False)
+    monkeypatch.setenv("PLAYBOOK_ID_VERIFY", "")
+    s = load_settings(simulate=True)
+    assert s.playbook_id_fix is None and s.playbook_id_verify is None
+    monkeypatch.setenv("PLAYBOOK_ID_FIX", "pb-1")
+    monkeypatch.setenv("PLAYBOOK_ID_VERIFY", "pb-2")
+    s = load_settings(simulate=True)
+    assert (s.playbook_id_fix, s.playbook_id_verify) == ("pb-1", "pb-2")
+
+
+def test_automation_shims_pass_playbook_ids_through():
+    m = automations.map_payload(REPO, AUTO, "pb-1")
+    r = automations.reduce_payload(REPO, AUTO, "main", 5, "pb-2")
+    assert "PLAYBOOK_ID_FIX=pb-1 python -m orchestrator map" in m["actions"][0]["prompt"]
+    assert "PLAYBOOK_ID_VERIFY=pb-2 python -m orchestrator reduce" in r["actions"][0]["prompt"]
+    assert automations.validate_payload(m) == [] and automations.validate_payload(r) == []
+    assert "PLAYBOOK_ID" not in automations.map_payload(REPO, AUTO)["actions"][0]["prompt"]
 
 
 def test_reduce_adds_regression_guards_for_landed_fixes(registry, world):
