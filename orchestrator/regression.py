@@ -45,10 +45,6 @@ class Failure:
     base_exit_code: int | None
     evidence: str
 
-    @property
-    def caption(self) -> str:
-        return f"`{self.probe}`" + (f" (guards #{self.issue})" if self.issue else "")
-
 
 def failures(output: dict[str, Any]) -> list[Failure]:
     """The probes behind an `acceptance_met == false` verdict."""
@@ -150,6 +146,7 @@ def file_regression(
     *,
     devin: DevinClient,
     gh: GitHubClient,
+    ledger: IssueLedger,
     target_repo: str,
     automation_repo: str,
     session: dict[str, Any],
@@ -198,7 +195,6 @@ def file_regression(
     )
     fix_id = str(fix["session_id"])
 
-    ledger = IssueLedger(gh, target_repo)
     ledger.append(
         number,
         "Remediation session started",

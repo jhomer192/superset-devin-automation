@@ -27,14 +27,6 @@ class Settings:
     simulate: bool
     log_level: str
 
-    @property
-    def target_owner(self) -> str:
-        return self.target_repo.split("/", 1)[0]
-
-    @property
-    def target_name(self) -> str:
-        return self.target_repo.split("/", 1)[1]
-
     def require_live(self) -> None:
         missing = [
             name
