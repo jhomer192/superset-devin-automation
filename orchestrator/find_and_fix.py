@@ -20,8 +20,8 @@ from typing import Any
 
 from .autopr_job import AutoprReport, _in_flight_reason, publish_fixes
 from .devin_api import DevinClient
-from .github_api import GitHubClient
-from .ledger import IssueLedger
+from .github_api import GitHubClient, closing_issue_numbers
+from .ledger import IssueLedger, LedgerEntry, find
 from .registry import Registry
 from .regression import REGRESSION_LABEL, regression_record, start_regression_fix
 from .status import autopr_lines, post_run
@@ -73,6 +73,91 @@ def recent_regression_issues(
     return sorted(recent, key=lambda i: int(i["number"]))
 
 
+@dataclass(frozen=True)
+class Coverage:
+    """A fix for `issue` that already covers a probe: in flight, or merged at `merged_at`."""
+
+    issue: int
+    reason: str
+    merged_at: datetime | None = None
+
+    def covers(self, candidate: dict[str, Any]) -> bool:
+        if self.merged_at is None:
+            return True
+        opened = _opened_at(candidate)
+        return opened is not None and opened < self.merged_at
+
+
+def _record_probes(record: LedgerEntry) -> list[str]:
+    return [str(p) for p in record.data.get("probes") or []]
+
+
+def covered_probes(
+    *,
+    devin: DevinClient,
+    gh: GitHubClient,
+    ledger: IssueLedger,
+    target_repo: str,
+    open_prs: list[dict[str, Any]],
+) -> dict[str, Coverage]:
+    """Every probe some other regression issue's fix already covers.
+
+    An open issue with a fix in flight (live session or open PR that closes it) covers its probes
+    outright. A closed issue whose fix PR merged covers its probes for every candidate filed
+    before that merge: the candidate's failure predates the fix, so it has not been re-verified.
+    """
+    covered: dict[str, Coverage] = {}
+    for issue in gh.list_issues(target_repo, labels=REGRESSION_LABEL, state="open"):
+        number = int(issue["number"])
+        entries = ledger.read(number)
+        record = regression_record(entries)
+        if record is None:
+            continue
+        reason = _in_flight_reason(number, entries, open_prs, devin, target_repo)
+        if reason:
+            for probe in _record_probes(record):
+                covered.setdefault(probe, Coverage(number, reason))
+    merged = [p for p in gh.list_pulls(target_repo, state="closed") if p.get("merged_at")]
+    for issue in gh.list_issues(target_repo, labels=REGRESSION_LABEL, state="closed"):
+        number = int(issue["number"])
+        record = regression_record(ledger.read(number))
+        if record is None:
+            continue
+        for pr in merged:
+            text = f"{pr.get('title', '')}\n{pr.get('body', '')}"
+            if number not in closing_issue_numbers(text, target_repo):
+                continue
+            merged_at = datetime.fromisoformat(str(pr["merged_at"]).replace("Z", "+00:00"))
+            coverage = Coverage(number, f"merged PR {pr['html_url']} closed #{number}", merged_at)
+            for probe in _record_probes(record):
+                covered.setdefault(probe, coverage)
+    return covered
+
+
+def _covering(
+    record: LedgerEntry, candidate: dict[str, Any], covered: dict[str, Coverage]
+) -> Coverage | None:
+    """The first coverage of one of the candidate's probes by another issue's fix, if any."""
+    number = int(candidate["number"])
+    for probe in _record_probes(record):
+        coverage = covered.get(probe)
+        if coverage is not None and coverage.issue != number and coverage.covers(candidate):
+            return coverage
+    return None
+
+
+def _note_covered(ledger: IssueLedger, number: int, coverage: Coverage, probes: list[str]) -> str:
+    reason = f"{', '.join(probes)} already covered by #{coverage.issue}: {coverage.reason}"
+    if not find(ledger.read(number), "fix_covered", by=coverage.issue):
+        ledger.append(
+            number,
+            "Fix deferred: another regression issue's fix covers these probes",
+            LedgerEntry("fix_covered", data={"by": coverage.issue, "probes": probes}),
+            [reason, "the probes are re-verified when that fix merges; a failure then files anew"],
+        )
+    return reason
+
+
 def fix_recent_regressions(
     *,
     devin: DevinClient,
@@ -90,6 +175,7 @@ def fix_recent_regressions(
     issues = recent_regression_issues(gh, target_repo, hours, now, include)
     report.scanned = len(issues)
     open_prs = gh.list_pulls(target_repo, state="open")
+    covered = covered_probes(devin=devin, gh=gh, ledger=ledger, target_repo=target_repo, open_prs=open_prs)
     for issue in issues:
         number = int(issue["number"])
         entries = ledger.read(number)
@@ -104,16 +190,25 @@ def fix_recent_regressions(
             report.skipped_in_flight.append({"issue": number, "reason": reason})
             log.info("find-and-fix: #%d skipped, %s", number, reason)
             continue
-        report.started.append(
-            start_regression_fix(
-                devin=devin,
-                ledger=ledger,
-                target_repo=target_repo,
-                automation_repo=automation_repo,
-                issue=issue,
-                record=record,
-            )
+        coverage = _covering(record, issue, covered)
+        if coverage is not None:
+            shared = [p for p in _record_probes(record) if covered.get(p) == coverage]
+            reason = _note_covered(ledger, number, coverage, shared)
+            report.skipped_in_flight.append({"issue": number, "reason": reason})
+            log.info("find-and-fix: #%d skipped, %s", number, reason)
+            continue
+        started = start_regression_fix(
+            devin=devin,
+            ledger=ledger,
+            target_repo=target_repo,
+            automation_repo=automation_repo,
+            issue=issue,
+            record=record,
         )
+        report.started.append(started)
+        started_now = Coverage(number, f"fix session {started['session_id']} started this run")
+        for probe in _record_probes(record):
+            covered.setdefault(probe, started_now)
     if wait and report.started:
         publish_fixes(devin, gh, target_repo, ledger, report, sleep)
     return [int(i["number"]) for i in issues], report

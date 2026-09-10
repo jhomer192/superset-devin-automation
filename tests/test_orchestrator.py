@@ -1,5 +1,6 @@
 import copy
 import json
+from datetime import UTC, datetime
 
 import pytest
 
@@ -7,9 +8,9 @@ from orchestrator import automations, playbooks, prompts
 from orchestrator.__main__ import cmd_simulate
 from orchestrator.autopr_job import NotARegressionIssue, extract_regression_issue, run_autopr
 from orchestrator.config import load_settings
-from orchestrator.find_and_fix import run_find_and_fix
+from orchestrator.find_and_fix import fix_recent_regressions, run_find_and_fix
 from orchestrator.github_api import closing_issue_numbers
-from orchestrator.ledger import IssueLedger, find
+from orchestrator.ledger import IssueLedger, LedgerEntry, find
 from orchestrator.publish import publish_verification
 from orchestrator.registry import load_registry
 from orchestrator.sessions import Liveness, classify, holds_slot, is_finished, wait_until_finished
@@ -1107,6 +1108,75 @@ def test_finder_replay_starts_nothing_new_and_reports_once(registry, world):
     assert again.fixes["started"] == [] and again.status_issue is None
     assert "already closes" in again.fixes["skipped_in_flight"][0]["reason"]
     assert (len(devin.sessions), len(gh.comments[first.status_issue])) == before
+
+
+def regression_issue(gh, probes, *, title="regression"):
+    """An open sda-regression issue with the `regression_depth` record TESTING would have written."""
+    issue = gh.create_issue(REPO, title, "filed by a verification", ["sda-regression", "regression"])
+    IssueLedger(gh, REPO).append(
+        issue["number"],
+        "Regression lineage",
+        LedgerEntry("regression_depth", data={"depth": 1, "probes": probes, "window": [14]}),
+        [],
+    )
+    return issue["number"]
+
+
+def do_fix_recent(devin, gh, **kwargs):
+    return fix_recent_regressions(
+        devin=devin,
+        gh=gh,
+        target_repo=REPO,
+        automation_repo=AUTO,
+        hours=24,
+        wait=False,
+        sleep=lambda _s: None,
+        **kwargs,
+    )
+
+
+def test_finder_starts_one_fix_for_two_issues_whose_probes_overlap(registry, world):
+    devin, gh = world
+    first = fail_verification(devin, gh, registry).regression_filed["issue"]
+    second = regression_issue(gh, ["issue_1/unit", "issue_5/unit"])
+    candidates, report = do_fix_recent(devin, gh)
+    assert candidates == [first, second]
+    assert [s["issue"] for s in report.started] == [first]
+    (skipped,) = report.skipped_in_flight
+    assert skipped["issue"] == second and f"issue_5/unit already covered by #{first}" in skipped["reason"]
+    covered = find(IssueLedger(gh, REPO).read(second), "fix_covered", by=first)
+    assert len(covered) == 1 and covered[0].data["probes"] == ["issue_5/unit"]
+    # a replay changes nothing: the first fix holds the slot, the second stays deferred, one comment
+    again = do_fix_recent(devin, gh)[1]
+    assert again.started == [] and len(find(IssueLedger(gh, REPO).read(second), "fix_covered")) == 1
+    assert len([s for s in devin.sessions.values() if "sda-fix" in s["tags"]]) == 1
+
+
+def test_finder_skips_an_issue_whose_probes_an_in_flight_pr_already_fixes(registry, world):
+    devin, gh = world
+    fixed = regression_issue(gh, ["issue_1/unit"])
+    gh.open_pull(99, title="fix", body=f"Closes #{fixed}")
+    later = regression_issue(gh, ["issue_1/unit", "issue_1/startup_log"])
+    _, report = do_fix_recent(devin, gh)
+    assert report.started == [] and {s["issue"] for s in report.skipped_in_flight} == {fixed, later}
+    reason = next(s for s in report.skipped_in_flight if s["issue"] == later)["reason"]
+    assert f"covered by #{fixed}: open PR" in reason
+
+
+def test_finder_skips_an_issue_filed_before_a_merged_fix_for_the_same_probes(registry, world):
+    devin, gh = world
+    fixed = regression_issue(gh, ["issue_1/unit"])
+    stale = regression_issue(gh, ["issue_1/unit"])
+    fresh = regression_issue(gh, ["issue_1/unit"])
+    gh.issues[stale]["created_at"] = "2026-01-01T00:00:00Z"
+    gh.issues[fresh]["created_at"] = "2026-01-01T00:00:02Z"
+    gh.merge(101, branch="master", sha="a" * 40, title="fix", body=f"Closes #{fixed}")
+    gh.close_completed(fixed)
+    gh.pulls[101]["merged_at"] = "2026-01-01T00:00:01Z"
+    _, report = do_fix_recent(devin, gh, now=datetime(2026, 1, 1, 1, tzinfo=UTC))
+    assert [s["issue"] for s in report.started] == [fresh]
+    (skipped,) = report.skipped_in_flight
+    assert skipped["issue"] == stale and "merged PR" in skipped["reason"]
 
 
 def test_finder_ignores_regression_issues_older_than_the_window(registry, world):

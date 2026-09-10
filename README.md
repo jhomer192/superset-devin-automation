@@ -23,7 +23,7 @@ PR merges into master ──► find-and-fix (one invocation, one daemon-style p
 
 | Name | Trigger | What the orchestrator does |
 |------|---------|----------------------------|
-| **find-and-fix** — `superset issue finder and fixer` | `github:pull_request` with `action == "closed"`, `pull_request.merged == true`, `repository.full_name == "jhomer192/superset"` | `python -m orchestrator find-and-fix --event-json <path>`: steps 1–5 above (`orchestrator/find_and_fix.py`, wrapping `testing_job.run_testing`, `regression.start_regression_fix` and `autopr_job.publish_fixes`). Issues without TESTING's `regression_depth` record, issues an open PR already closes, and issues whose fix session is still running are skipped and listed in the report. |
+| **find-and-fix** — `superset issue finder and fixer` | `github:pull_request` with `action == "closed"`, `pull_request.merged == true`, `repository.full_name == "jhomer192/superset"` | `python -m orchestrator find-and-fix --event-json <path>`: steps 1–5 above (`orchestrator/find_and_fix.py`, wrapping `testing_job.run_testing`, `regression.start_regression_fix` and `autopr_job.publish_fixes`). Issues without TESTING's `regression_depth` record, issues an open PR already closes, and issues whose fix session is still running are skipped and listed in the report. So is an issue whose probes overlap another issue's fix (in flight, started earlier in the same run, or merged after the issue was filed): it gets a `fix_covered` entry naming the covering issue and waits for the next verification. |
 
 find-and-fix is the only automation; there is no schedule. `python -m orchestrator autopr --wait` (triage every open
 `ready` issue, one fix session each, wait, post each verdict/PR/ACUs) remains a manual command for the
