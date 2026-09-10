@@ -35,6 +35,11 @@ Workflow:
    "Closes #<issue number>". PR title in Conventional Commits form. No AI-attribution footers
    anywhere (no Co-Authored-By, no "Generated with").
 
+Code rules:
+- Keep the fix minimal and clean: no compatibility shims, no feature flags around the change.
+- Code the fix makes unreachable is deleted in the same PR. Do not deprecate, comment out or
+  leave a TODO for it.
+
 Writing rules for everything you author (commit messages, PR body, code comments, docstrings):
 - Say what changed and why, once. No summary or "Overall" paragraph restating the diff, no
   padded bullet lists.
@@ -81,6 +86,10 @@ Do exactly this; the verdict comes from exit codes, not from your reading of the
      file). Do NOT include acceptance_met in that case.
 Do not modify anything under probes/ or verify/ in the automation checkout, and do not patch the
 target checkout; if a probe cannot run, report status "error". Do not open a PR.
+
+Anything you write (evidence, error_message, comments): what happened and where, once, in the
+scope you actually observed. No summary paragraphs, no negative parallelism ("not just X, it is
+Y"), no claims about checks you did not run.
 """
 
 
@@ -147,7 +156,8 @@ Workflow:
 6. Only once step 5 is green, open a pull request against {target_repo} master whose body
    contains the line "Closes #{issue_number}", the probe exit codes before and after, and the
    test command output. PR title in Conventional Commits form. No AI-attribution footers.
-7. Writing rules for the commit message, PR body and any comments: state what changed and why
+7. Code the fix makes unreachable is deleted in the same PR, never deprecated or left behind a
+   flag. Writing rules for the commit message, PR body and any comments: state what changed and why
    once, with no summary paragraph or padded lists; no negative parallelism ("not just X, it is
    Y") or rhetorical mirroring; do not restate rules the codebase already carries; claim only
    what you ran, and say the scope if it was narrower than the sentence implies.
