@@ -8,6 +8,7 @@
 | Apache Superset fork | https://github.com/jhomer192/superset |
 | Spec the verifier checks | https://github.com/jhomer192/superset/blob/master/PRD.md |
 | Run log (every verification and fix run, with verdicts, session links and ACUs) | https://github.com/jhomer192/superset/issues/25 |
+| Loom walkthrough | https://www.loom.com/share/7927552814f148d4a27f82e35c766117 |
 
 `README.md` covers how to run or simulate the workflow (`docker compose up` runs the full loop offline with no keys).
 
