@@ -206,6 +206,16 @@ Acceptance is mechanical: a probe for an issue the PR closes must **pass at HEAD
 BASE**; one that already passes at BASE fails the run (`verification_prompt` states why). A
 probe for an already-landed fix (regression guard) must pass at HEAD.
 
+### The spec: PRD.md
+
+The target repo carries `PRD.md`, a product requirements document with stable ids
+(`PRD-SEC-1`, `PRD-AUTH-1`, ...). The `prd.requirements` block of `probes/registry.json` maps
+each id to the probes that hold it, either an issue's probe or a standalone one under
+`probes/prd/` (listed in the registry's top-level `probes`). Every verification passes all
+requirement ids as `--requirements`; each of their probes must pass at HEAD, and a failure files
+a regression issue whose title and table name the violated requirement. Adding coverage means
+adding a requirement to `PRD.md` and a probe for it to the registry.
+
 With `--wait` (the registered shim always passes it) the command then polls
 `GET /sessions/{id}` every 60 s until the verification reaches a terminal state, with no
 deadline, and publishes through `orchestrator/publish.py`: a `session_reported` comment with the

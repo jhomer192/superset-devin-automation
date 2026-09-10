@@ -46,6 +46,7 @@ class TestingReport:
     base_sha: str | None = None
     closes: list[int] = field(default_factory=list)
     regression_issues: list[int] = field(default_factory=list)
+    requirements: list[str] = field(default_factory=list)
     session_id: str | None = None
     skipped_reason: str | None = None
     merge_index: int | None = None
@@ -195,8 +196,15 @@ def run_testing(
     regression = regression_issue_numbers(gh, registry, target_repo, set(closes))
     report.regression_issues = regression
 
+    requirements = registry.requirement_ids()
+    report.requirements = requirements
+
     probes: list[Probe] = registry.probes_for(closes)
     regression_probes: list[Probe] = registry.probes_for(regression)
+    seen = {p.id for p in probes + regression_probes}
+    requirement_probes: list[Probe] = [
+        p for _, p in registry.requirement_probes(requirements) if p.id not in seen
+    ]
 
     if not playbook_id:
         log.warning("TESTING: PLAYBOOK_ID_VERIFY unset, using the fully inline verification prompt")
@@ -207,8 +215,9 @@ def run_testing(
         base_sha,
         pr_url,
         closes,
-        probes + regression_probes,
+        probes + regression_probes + requirement_probes,
         playbook_id,
+        requirements,
     )
     if regression:
         prompt += (
@@ -240,6 +249,7 @@ def run_testing(
                 "head": head_sha,
                 "base": base_sha,
                 "window": list(report.window_prs),
+                "requirements": requirements,
             },
         ),
         [

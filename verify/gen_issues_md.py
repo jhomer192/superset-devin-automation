@@ -57,6 +57,19 @@ def render(registry: Registry) -> str:
             f"| {_cell(issue.title)} | {state} "
             f"| {issue.category} | {_cell(issue.condition)} | {probes} | {_outcome(issue)} |"
         )
+    lines += [
+        "",
+        "## PRD requirements",
+        "",
+        f"Requirements from `{registry.prd_path}` in `{registry.repo}`. Every one is guarded at HEAD on",
+        "every verification; a failing probe files a regression issue naming the requirement id.",
+        "",
+        "| Requirement | Title | Probes |",
+        "|-------------|-------|--------|",
+    ]
+    for req in registry.requirements:
+        probes = "<br>".join(f"`{p}`" for p in req.probes) or "none"
+        lines.append(f"| {req.id} | {_cell(req.title)} | {probes} |")
     lines.append("")
     return "\n".join(lines)
 

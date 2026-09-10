@@ -35,8 +35,9 @@ _PROBE_RESULT = {
         "evidence",
     ],
     "properties": {
-        "issue": {"type": "integer", "minimum": 1},
+        "issue": {"type": "integer", "minimum": 0},
         "probe": {"type": "string", "minLength": 1},
+        "requirements": {"type": "array", "items": {"type": "string", "minLength": 1}},
         "kind": {
             "type": "string",
             "enum": ["offline_pytest", "offline_static", "log_assertion", "integration", "live_http"],

@@ -1268,3 +1268,130 @@ def test_finder_fills_trimmed_event_from_the_api(registry, world):
     report = do_reduce(devin, gh, registry, event=trimmed)
     assert report.session_id and report.merge_commit_sha == event["pull_request"]["merge_commit_sha"]
     assert report.pr_url == event["pull_request"]["html_url"]
+
+
+# --- PRD requirements ----------------------------------------------------------------------------
+
+
+def test_registry_maps_every_prd_requirement_to_known_probes(registry):
+    assert registry.requirement_ids()[:1] == ["PRD-SEC-1"]
+    known = registry.all_probes()
+    for req in registry.requirements:
+        assert req.probes, req.id
+        assert all(p in known for p in req.probes), req.id
+    assert known["prd/health"][0] == 0 and known["issue_1/unit"][0] == 1
+    assert registry.requirements_of("issue_1/unit") == ["PRD-SEC-1"]
+    ids = [p.id for _, p in registry.requirement_probes(["PRD-SEC-1", "PRD-OPS-1"])]
+    assert ids == ["issue_1/unit", "issue_1/startup_log", "prd/health"]
+
+
+def test_registry_rejects_requirement_naming_an_unknown_probe(tmp_path):
+    import json
+    from pathlib import Path
+
+    from orchestrator.registry import REGISTRY_PATH
+
+    raw = json.loads(Path(REGISTRY_PATH).read_text())
+    raw["prd"]["requirements"].append({"id": "PRD-X", "title": "x", "probes": ["nope/none"]})
+    probes_dir = tmp_path / "probes"
+    probes_dir.mkdir()
+    for p in [p for i in raw["issues"] for p in i["probes"]] + raw["probes"]:
+        (tmp_path / p["script"]).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / p["script"]).write_text("")
+    bad = probes_dir / "registry.json"
+    bad.write_text(json.dumps(raw))
+    with pytest.raises(ValueError, match="PRD-X"):
+        load_registry(bad)
+
+
+def test_collect_guards_prd_requirement_probes_at_head(registry, tmp_path):
+    from verify.collect import build_results
+
+    log = tmp_path / "l.log"
+    log.write_text("x")
+    rows = [
+        {
+            "probe": "prd/health",
+            "issue": 0,
+            "kind": "live_http",
+            "log": str(log),
+            "role": "head",
+            "exit_code": 0,
+        },
+        {
+            "probe": "prd/health",
+            "issue": 0,
+            "kind": "live_http",
+            "log": str(log),
+            "role": "base",
+            "exit_code": 0,
+        },
+    ]
+    out = build_results(rows, set(), set(), {"PRD-OPS-1"}, registry)
+    assert out[0]["acceptance_met"] is True and out[0]["requirements"] == ["PRD-OPS-1"]
+    assert build_results(rows, set(), set(), set(), registry)[0]["acceptance_met"] is False
+    rows[0]["exit_code"] = 1
+    assert build_results(rows, set(), set(), {"PRD-OPS-1"}, registry)[0]["acceptance_met"] is False
+    from orchestrator.schema import VERIFICATION_SCHEMA, validate
+
+    validate(
+        {
+            "status": "success",
+            "head_sha": "h" * 40,
+            "acceptance_met": False,
+            "probe_command": "x",
+            "probe_exit_code": 1,
+            "evidence": "e",
+            "results": build_results(rows, set(), set(), {"PRD-OPS-1"}, registry),
+        },
+        VERIFICATION_SCHEMA,
+    )
+
+
+def test_regression_issue_names_the_violated_requirement():
+    from orchestrator.regression import failures, issue_body, issue_title
+
+    output = {
+        "results": [
+            {
+                "probe": "prd/health",
+                "issue": 0,
+                "requirements": ["PRD-OPS-1"],
+                "acceptance_met": False,
+                "head_exit_code": 1,
+                "base_exit_code": 0,
+                "evidence": "boom",
+            },
+            {
+                "probe": "issue_5/unit",
+                "issue": 5,
+                "requirements": ["PRD-SQL-1"],
+                "acceptance_met": True,
+                "head_exit_code": 0,
+                "base_exit_code": 0,
+                "evidence": "",
+            },
+        ]
+    }
+    items = failures(output)
+    assert [f.probe for f in items] == ["prd/health"]
+    assert issue_title(27, items) == "Regression on merged PR #27: PRD-OPS-1 violated at HEAD (prd/health)"
+    body = issue_body(
+        target_repo=REPO,
+        automation_repo=AUTO,
+        pr_url="https://x/pr/27",
+        window_prs=[27],
+        head_sha="h" * 40,
+        base_sha="b" * 40,
+        items=items,
+        session_url="https://s",
+    )
+    assert "| prd/health | PRD-OPS-1 | - | 0 | 1 |" in body
+
+
+def test_verification_session_guards_every_prd_requirement(registry, world):
+    devin, gh = world
+    report, _ = fail_verification_at_every_n_5(devin, gh, registry)
+    assert report.requirements == registry.requirement_ids()
+    prompt = devin.sessions[report.session_id]["prompt"]
+    assert '--requirements "PRD-SEC-1,' in prompt and "prd/health (live_http)" in prompt
