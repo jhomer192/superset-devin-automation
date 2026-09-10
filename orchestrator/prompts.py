@@ -125,9 +125,10 @@ def regression_fix_prompt(
     pr_url: str,
     head_sha: str,
     probes: list[str],
+    playbook_id: str | None = None,
 ) -> str:
     probe_lines = "\n".join(f"  - {p}" for p in probes)
-    return f"""@{target_repo}
+    return f"""{_header(target_repo, playbook_id)}
 
 Fix GitHub issue #{issue_number} in {target_repo}: a probe fails on master after {pr_url} merged.
 

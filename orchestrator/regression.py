@@ -234,6 +234,8 @@ def start_regression_fix(
     automation_repo: str,
     issue: dict[str, Any],
     record: LedgerEntry,
+    trigger: str,
+    playbook_id: str | None = None,
 ) -> dict[str, Any]:
     """Start the one fix session for a regression issue, from what TESTING recorded on it."""
     number = int(issue["number"])
@@ -251,6 +253,7 @@ def start_regression_fix(
                 pr_url=pr_url,
                 head_sha=head_sha,
                 probes=probes,
+                playbook_id=playbook_id,
             ),
             "title": f"Fix regression {target_repo}#{number} from {pr_url}",
             "tags": [FIX_TAG, REGRESSION_TAG, f"issue-{number}"],
@@ -271,7 +274,7 @@ def start_regression_fix(
                 "regression_of": pr_url,
                 "window": list(record.data.get("window") or []),
                 "depth": record.data.get("depth", 0),
-                "trigger": "github:issues",
+                "trigger": trigger,
             },
         ),
         [
@@ -279,5 +282,5 @@ def start_regression_fix(
             f"deciding probes: {', '.join(probes)}",
         ],
     )
-    log.info("AUTOPR: regression #%d -> session %s", number, fix_id)
+    log.info("%s: regression #%d -> session %s", trigger, number, fix_id)
     return {"issue": number, "session_id": fix_id, "probes": probes}
