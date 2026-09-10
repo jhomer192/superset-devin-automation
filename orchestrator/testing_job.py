@@ -59,14 +59,26 @@ class TestingReport:
         return self.__dict__.copy()
 
 
-def extract_merged_pr(event: dict[str, Any]) -> dict[str, Any]:
-    """Validate the github:pull_request payload the way the automation trigger does."""
-    pr = event.get("pull_request") or {}
+def extract_merged_pr(
+    event: dict[str, Any], gh: GitHubClient | None = None, target_repo: str | None = None
+) -> dict[str, Any]:
+    """Validate the github:pull_request payload the way the automation trigger does.
+
+    The payload Devin delivers is a trimmed pull_request (no merge_commit_sha); missing fields
+    are filled from the GitHub API when a client is given.
+    """
+    pr = dict(event.get("pull_request") or {})
     if event.get("action") != "closed" or not pr.get("merged"):
         raise NotAMergedPR("event is not a merged pull_request (action=closed, merged=true)")
+    if not pr.get("number"):
+        raise NotAMergedPR("pull_request lacks a number")
+    if gh is not None and target_repo and not (pr.get("merge_commit_sha") and pr.get("html_url")):
+        full = gh.get_pull(target_repo, int(pr["number"]))
+        pr = {**full, **{k: v for k, v in pr.items() if v not in (None, "", {})}}
+        pr["merge_commit_sha"] = full.get("merge_commit_sha") or pr.get("merge_commit_sha")
     if not pr.get("merge_commit_sha") or not pr.get("html_url"):
         raise NotAMergedPR("pull_request lacks merge_commit_sha or html_url")
-    return dict(pr)
+    return pr
 
 
 def dedup_key(pr_url: str, merge_commit_sha: str) -> str:
@@ -112,13 +124,13 @@ def run_testing(
     wait: bool = False,
     sleep: Callable[[float], None] = time.sleep,
 ) -> TestingReport:
-    pr = extract_merged_pr(event)
+    repo_full = str((event.get("repository") or {}).get("full_name") or target_repo)
+    pr = extract_merged_pr(event, gh if repo_full.lower() == target_repo.lower() else None, target_repo)
     pr_url = str(pr["html_url"])
     head_sha = str(pr["merge_commit_sha"])
     number = int(pr["number"])
     report = TestingReport(pr_url=pr_url, merge_commit_sha=head_sha)
 
-    repo_full = str((event.get("repository") or {}).get("full_name") or target_repo)
     if repo_full.lower() != target_repo.lower():
         report.skipped_reason = f"event is for {repo_full}, not {target_repo}"
         return report

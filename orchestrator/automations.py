@@ -1,11 +1,12 @@
-"""Build and register the two automations (CYCLE, AUTOPR) through the Automations API.
+"""Build and register the one automation (CYCLE) through the Automations API.
 
-CYCLE is the daemon: a PR merges -> verify every 5th merge, wait for the verdict, post it on
-every PR of the window, file an `sda-regression` issue on failure -> start one fix session per
-`sda-regression` issue opened in the last N hours -> wait for all of them (none is fine) -> append
-the cycle report to the status issue -> the fix PRs merge and re-enter the cadence. AUTOPR is the
-Friday sweep over `ready` issues. Each stage publishes its own telemetry; there is no sweeper.
-Automations under retired names (MAP, REDUCE, REPORT, TESTING) are deleted on register.
+CYCLE is the daemon: a PR merges -> verify (every merge by default; VERIFY_EVERY_N_MERGES=5 for
+every 5th), wait for the verdict, post it on every PR of the window, file an `sda-regression`
+issue on failure -> start one fix session per `sda-regression` issue opened in the last N hours ->
+wait for all of them (none is fine) -> append the cycle report to the status issue -> the fix PRs
+merge and re-enter the loop. Each stage publishes its own telemetry; there is no sweeper and no
+schedule. Automations under retired names (MAP, REDUCE, REPORT, TESTING, AUTOPR) are deleted on
+register.
 
 Every payload is validated locally against the request schemas vendored from
 https://docs.devin.ai/v3-openapi.yaml (orchestrator/v3_schemas.json) before anything is sent.
@@ -31,9 +32,10 @@ from .regression import REGRESSION_LABEL
 
 SCHEMAS_PATH = Path(__file__).with_name("v3_schemas.json")
 FRIDAY_RRULE = "FREQ=WEEKLY;BYDAY=FR"
-AUTOPR_NAME = "superset-devin-automation: AUTOPR (Friday ready-issue sweep)"
-CYCLE_NAME = "superset-devin-automation: CYCLE (verify every 5th merge, fix regressions, report)"
+CYCLE_NAME = "superset-devin-automation: CYCLE (merge -> verify, fix regressions, report)"
 RETIRED_NAMES = (
+    "superset-devin-automation: AUTOPR (Friday ready-issue sweep)",
+    "superset-devin-automation: CYCLE (verify every 5th merge, fix regressions, report)",
     "superset-devin-automation: AUTOPR (fix session per regression issue + Friday sweep)",
     "superset-devin-automation: TESTING (verify every 5th merge, file regressions)",
     "superset-devin-automation: MAP (Friday ready-issue sweep)",
@@ -79,51 +81,11 @@ def _env_prefix(name: str, playbook_id: str | None) -> str:
     return f"{name}={playbook_id} " if playbook_id else ""
 
 
-def autopr_payload(
-    target_repo: str, automation_repo: str, playbook_id_fix: str | None = None
-) -> dict[str, Any]:
-    prompt = (
-        _shim(
-            automation_repo,
-            _env_prefix("PLAYBOOK_ID_FIX", playbook_id_fix) + "python -m orchestrator autopr --wait",
-        )
-        + f"\nTarget repository for issues: @{target_repo}\n"
-        + "The command triages every open `ready` issue, starts one fix session per eligible issue, waits "
-        "for them and posts each outcome on its issue; it can run for hours, keep waiting.\n"
-    )
-    return {
-        "name": AUTOPR_NAME,
-        "enabled": True,
-        "run_as": {"type": "organization"},
-        "metadata": {
-            "component": "autopr",
-            "target_repo": target_repo,
-            "playbook_id_fix": playbook_id_fix or "",
-        },
-        "triggers": [
-            {
-                "event_type": "schedule:recurring",
-                "conditions": {
-                    "any": [{"all": [{"field": "rrule", "operator": "recurrence", "value": FRIDAY_RRULE}]}]
-                },
-            },
-        ],
-        "actions": [
-            {
-                "type": "start_session",
-                "prompt": prompt,
-                "session": {"tags": ["sda-autopr"]},
-            }
-        ],
-        "session_settings": {"net_policy": NET_POLICY},
-    }
-
-
 def cycle_payload(
     target_repo: str,
     automation_repo: str,
     verify_branch: str = "master",
-    every_n: int = 5,
+    every_n: int = 1,
     issue_window_hours: int = 24,
     playbook_id_verify: str | None = None,
     playbook_id_fix: str | None = None,
@@ -225,7 +187,7 @@ def register(
     automation_repo: str,
     *,
     verify_branch: str = "master",
-    every_n: int = 5,
+    every_n: int = 1,
     issue_window_hours: int = 24,
     playbook_id_fix: str | None = None,
     playbook_id_verify: str | None = None,
@@ -248,7 +210,6 @@ def register(
             playbook_id_verify,
             playbook_id_fix,
         ),
-        autopr_payload(target_repo, automation_repo, playbook_id_fix),
     )
     for payload in payloads:
         errors = validate_payload(payload)

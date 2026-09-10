@@ -353,7 +353,7 @@ def test_verify_settings_from_environment(monkeypatch):
     monkeypatch.delenv("VERIFY_BRANCH", raising=False)
     monkeypatch.delenv("VERIFY_EVERY_N_MERGES", raising=False)
     s = load_settings(simulate=True)
-    assert s.verify_branch == "master" and s.verify_every_n_merges == 5
+    assert s.verify_branch == "master" and s.verify_every_n_merges == 1
     monkeypatch.setenv("VERIFY_BRANCH", "main")
     monkeypatch.setenv("VERIFY_EVERY_N_MERGES", "3")
     s = load_settings(simulate=True)
@@ -369,10 +369,7 @@ def test_verify_settings_from_environment(monkeypatch):
 
 
 def test_automation_payloads_validate_against_openapi_and_carry_no_ceilings():
-    for payload in (
-        automations.autopr_payload(REPO, AUTO),
-        automations.cycle_payload(REPO, AUTO),
-    ):
+    for payload in (automations.cycle_payload(REPO, AUTO), automations.cycle_payload(REPO, AUTO, every_n=5)):
         assert automations.validate_payload(payload) == []
         automations.assert_no_ceilings(payload)
         assert payload["run_as"] == {"type": "organization"}
@@ -383,12 +380,11 @@ def test_automation_payloads_validate_against_openapi_and_carry_no_ceilings():
         assert "python -m orchestrator" in payload["actions"][0]["prompt"]
 
 
-def test_autopr_triggers_on_friday_only_and_cycle_on_merged_prs():
-    (friday,) = automations.autopr_payload(REPO, AUTO)["triggers"]
-    assert friday["event_type"] == "schedule:recurring"
-    assert friday["conditions"]["any"][0]["all"] == [
-        {"field": "rrule", "operator": "recurrence", "value": "FREQ=WEEKLY;BYDAY=FR"}
-    ]
+def test_cycle_triggers_on_merged_prs_only_and_verifies_every_merge_by_default():
+    assert "VERIFY_EVERY_N_MERGES=1 " in automations.cycle_payload(REPO, AUTO)["actions"][0]["prompt"]
+    assert (
+        "VERIFY_EVERY_N_MERGES=5 " in automations.cycle_payload(REPO, AUTO, every_n=5)["actions"][0]["prompt"]
+    )
     cycle = automations.cycle_payload(REPO, AUTO, issue_window_hours=6)
     (r,) = cycle["triggers"]
     assert r["event_type"] == "github:pull_request"
@@ -399,15 +395,15 @@ def test_autopr_triggers_on_friday_only_and_cycle_on_merged_prs():
 
 
 def test_invalid_payloads_are_rejected():
-    bad = automations.autopr_payload(REPO, AUTO)
+    bad = automations.cycle_payload(REPO, AUTO)
     bad["limits"] = {"max_acu_limit": 10}
     with pytest.raises(ValueError, match="max_acu_limit"):
         automations.assert_no_ceilings(bad)
-    bad = automations.autopr_payload(REPO, AUTO)
+    bad = automations.cycle_payload(REPO, AUTO)
     bad["actions"].append({"type": "start_session", "prompt": "second"})
     with pytest.raises(ValueError, match="at most one"):
         automations.assert_no_ceilings(bad)
-    bad = automations.autopr_payload(REPO, AUTO)
+    bad = automations.cycle_payload(REPO, AUTO)
     bad["triggers"][0]["event_type"] = "cron"
     assert automations.validate_payload(bad)
 
@@ -416,7 +412,9 @@ def test_register_is_idempotent_by_name():
     devin = FakeDevin()
     automations.register(devin, REPO, AUTO)
     automations.register(devin, REPO, AUTO)
-    assert len(devin.automations) == 2
+    assert len(devin.automations) == 1
+    (only,) = devin.automations.values()
+    assert only["name"] == automations.CYCLE_NAME and "schedule" not in json.dumps(only["triggers"])
 
 
 class OrderedDevin(FakeDevin):
@@ -446,11 +444,8 @@ def with_retired_automations(devin):
 def test_register_deletes_retired_automations_only_after_the_replacements_exist():
     devin = with_retired_automations(OrderedDevin())
     results = automations.register(devin, REPO, AUTO)
-    assert devin.order == ["create"] * 2 + ["delete"] * len(automations.RETIRED_NAMES)
-    assert {a["name"] for a in devin.automations.values()} == {
-        automations.CYCLE_NAME,
-        automations.AUTOPR_NAME,
-    }
+    assert devin.order == ["create"] + ["delete"] * len(automations.RETIRED_NAMES)
+    assert {a["name"] for a in devin.automations.values()} == {automations.CYCLE_NAME}
     assert [r["name"] for r in results if r.get("deleted")] == list(automations.RETIRED_NAMES)
 
     failing = with_retired_automations(OrderedDevin())
@@ -1171,10 +1166,26 @@ def test_playbook_settings_from_environment(monkeypatch):
     assert (s.playbook_id_fix, s.playbook_id_verify) == ("pb-1", "pb-2")
 
 
-def test_automation_shims_pass_playbook_ids_through():
-    a = automations.autopr_payload(REPO, AUTO, playbook_id_fix="pb-1")
-    c = automations.cycle_payload(REPO, AUTO, "main", 5, playbook_id_verify="pb-2")
-    assert "PLAYBOOK_ID_FIX=pb-1 python -m orchestrator autopr" in a["actions"][0]["prompt"]
-    assert "PLAYBOOK_ID_VERIFY=pb-2 python -m orchestrator cycle" in c["actions"][0]["prompt"]
-    assert automations.validate_payload(a) == [] and automations.validate_payload(c) == []
-    assert "PLAYBOOK_ID" not in automations.autopr_payload(REPO, AUTO)["actions"][0]["prompt"]
+def test_automation_shim_passes_playbook_ids_through():
+    c = automations.cycle_payload(REPO, AUTO, "main", 5, playbook_id_verify="pb-2", playbook_id_fix="pb-1")
+    assert (
+        "PLAYBOOK_ID_VERIFY=pb-2 PLAYBOOK_ID_FIX=pb-1 python -m orchestrator cycle"
+        in c["actions"][0]["prompt"]
+    )
+    assert automations.validate_payload(c) == []
+    assert "PLAYBOOK_ID" not in automations.cycle_payload(REPO, AUTO)["actions"][0]["prompt"]
+
+
+def test_cycle_fills_trimmed_event_from_the_api(registry, world):
+    devin, gh = world
+    event = load_event()
+    trimmed = {
+        "action": "closed",
+        "pull_request": {k: event["pull_request"][k] for k in ("number", "merged", "base", "title")},
+        "repository": event["repository"],
+    }
+    with pytest.raises(NotAMergedPR, match="merge_commit_sha"):
+        extract_merged_pr(trimmed)
+    report = do_reduce(devin, gh, registry, event=trimmed)
+    assert report.session_id and report.merge_commit_sha == event["pull_request"]["merge_commit_sha"]
+    assert report.pr_url == event["pull_request"]["html_url"]
