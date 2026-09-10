@@ -940,7 +940,6 @@ def test_collect_accepts_a_requirement_probe_iff_it_exits_zero_at_head(registry,
             "issue": 5,
             "kind": "offline_pytest",
             "log": str(log),
-            "role": "head",
             "exit_code": 0,
         }
     ]
@@ -1065,6 +1064,41 @@ def test_finder_verifies_fixes_every_recent_regression_waits_and_reports(registr
     rollup = gh.comments[out.status_issue][-1]["body"]
     assert "find-and-fix:" in rollup and f"#{issue}" in rollup and "total ACUs: 2" in rollup
     assert find(IssueLedger(gh, REPO).read(out.status_issue), "run_reported", stage="find-and-fix")
+
+
+def test_finder_fix_sessions_use_the_fix_playbook_and_record_their_trigger(registry, world):
+    devin, gh = world
+    out = do_finder(devin, gh, registry, playbook_id="playbook-verify", fix_playbook_id="playbook-fix")
+    issue = out.testing["regression_filed"]["issue"]
+    (fix,) = [s for s in devin.sessions.values() if "sda-fix" in s["tags"]]
+    assert fix["prompt"].startswith(f"@{REPO} @playbook:playbook-fix\n")
+    assert "On top of the playbook workflow" in fix["prompt"] and "Workflow:\n1." not in fix["prompt"]
+    (verify,) = [s for s in devin.sessions.values() if "sda-fix" not in s["tags"]]
+    assert "@playbook:playbook-verify" in verify["prompt"] and "playbook-fix" not in verify["prompt"]
+    started = find(IssueLedger(gh, REPO).read(issue), "session_started")
+    assert started[-1].data["trigger"] == "find-and-fix"
+
+
+def test_regression_fix_prompt_inlines_the_workflow_only_without_a_playbook():
+    def prompt(playbook_id=None):
+        return prompts.regression_fix_prompt(
+            target_repo=REPO,
+            automation_repo=AUTO,
+            issue_number=41,
+            issue_url=f"https://github.com/{REPO}/issues/41",
+            pr_url=f"https://github.com/{REPO}/pull/37",
+            head_sha="a" * 40,
+            probes=["prd/api_requires_auth"],
+            playbook_id=playbook_id,
+        )
+
+    bare = prompt()
+    assert bare.startswith(f"@{REPO}\n") and "Workflow:\n1." in bare and "Closes #41" in bare
+    assert "On top of the playbook workflow" not in bare
+    with_playbook = prompt("pb")
+    assert with_playbook.startswith(f"@{REPO} @playbook:pb\n")
+    assert "Workflow:\n1." not in with_playbook and "tests/unit_tests/" in with_playbook
+    assert "prd/api_requires_auth" in with_playbook and "pull/37" in with_playbook
 
 
 def test_finder_fixes_the_issue_it_just_filed_even_when_the_label_listing_lags(registry, world):
@@ -1299,7 +1333,6 @@ def test_collect_guards_prd_requirement_probes_at_head(registry, tmp_path):
             "issue": 0,
             "kind": "live_http",
             "log": str(log),
-            "role": "head",
             "exit_code": 0,
         },
     ]

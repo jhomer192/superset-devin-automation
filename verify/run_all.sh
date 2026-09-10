@@ -145,7 +145,7 @@ while IFS=$'\t' read -r issue pid kind script; do
 import json, sys
 path, issue, pid, kind, code, log = sys.argv[1:]
 with open(path, "a") as f:
-    f.write(json.dumps({"issue": int(issue), "probe": pid, "kind": kind, "role": "head",
+    f.write(json.dumps({"issue": int(issue), "probe": pid, "kind": kind,
                         "exit_code": int(code), "log": log}) + "\n")
 PY
   echo "  ${pid} -> exit ${code}" >&2

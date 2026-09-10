@@ -110,6 +110,7 @@ def run_autopr_for_issue(
     event: dict[str, Any],
     wait: bool = False,
     sleep: Callable[[float], None] = time.sleep,
+    playbook_id: str | None = None,
 ) -> AutoprReport:
     report = AutoprReport(trigger="github:issues", scanned=1)
     issue = extract_regression_issue(event)
@@ -141,6 +142,8 @@ def run_autopr_for_issue(
         automation_repo=automation_repo,
         issue=issue,
         record=record,
+        trigger=report.trigger,
+        playbook_id=playbook_id,
     )
     report.started.append(started)
     if wait:
@@ -199,6 +202,7 @@ def run_autopr(
             event=event,
             wait=wait,
             sleep=sleep,
+            playbook_id=playbook_id,
         )
     report = AutoprReport()
     if not playbook_id:

@@ -118,6 +118,7 @@ def cmd_find_and_fix(
         every_n=settings.verify_every_n_merges,
         issue_window_hours=settings.regression_issue_window_hours,
         playbook_id=settings.playbook_id_verify,
+        fix_playbook_id=settings.playbook_id_fix,
         **kwargs,
     ).as_dict()
 
@@ -272,7 +273,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--simulate", action="store_true", help="in-memory clients, no API keys needed")
     sub = parser.add_subparsers(dest="command", required=True)
     p_autopr = sub.add_parser(
-        "autopr", help="issue event: fix session for that regression issue; no event: Friday sweep"
+        "autopr", help="issue event: fix session for that regression issue; no event: sweep `ready` issues"
     )
     p_autopr.add_argument("--event-json", type=Path, default=None)
     p_autopr.add_argument(
@@ -288,7 +289,7 @@ def main(argv: list[str] | None = None) -> int:
         help="merged-PR event: verify, fix every recent regression issue, wait for all, report",
     )
     p_cycle.add_argument("--event-json", type=Path, default=None)
-    p_reg = sub.add_parser("register", help="create/update the find-and-fix automation")
+    p_reg = sub.add_parser("register", help="create/update the find-and-fix automation; delete retired ones")
     p_reg.add_argument("--dry-run", action="store_true")
     p_pb = sub.add_parser(
         "register-playbooks", help="create/update the remediation and verification playbooks"
