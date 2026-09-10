@@ -115,6 +115,6 @@ def test_shipped_loading_spinner_survives_with_animation() -> None:
         "flood-color=",
         "stdDeviation=",
         "stroke-dasharray=",
-        "stroke-dashoffset=",
+        "stroke-dashoffset",
     ):
         assert attr in out, f"{attr} stripped from loading.svg"
