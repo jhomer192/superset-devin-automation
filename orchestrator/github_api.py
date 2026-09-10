@@ -47,6 +47,8 @@ class GitHubClient(Protocol):
 
     def get_issue(self, repo: str, number: int) -> JSON: ...
 
+    def create_issue(self, repo: str, title: str, body: str, labels: list[str]) -> JSON: ...
+
     def list_issue_comments(self, repo: str, number: int) -> list[JSON]: ...
 
     def create_issue_comment(self, repo: str, number: int, body: str) -> JSON: ...
@@ -58,8 +60,6 @@ class GitHubClient(Protocol):
     def list_merged_pulls(self, repo: str, base_branch: str) -> list[JSON]:
         """Every PR merged into base_branch, oldest merge first."""
         ...
-
-    def get_branch_sha(self, repo: str, branch: str) -> str: ...
 
     def get_commit_parents(self, repo: str, sha: str) -> list[str]: ...
 
@@ -97,6 +97,15 @@ class LiveGitHubClient:
         result: JSON = self._get(f"/repos/{repo}/issues/{number}")
         return result
 
+    def create_issue(self, repo: str, title: str, body: str, labels: list[str]) -> JSON:
+        result: JSON = request_json(
+            "POST",
+            f"{self._base}/repos/{repo}/issues",
+            headers=self._headers,
+            body={"title": title, "body": body, "labels": labels},
+        )
+        return result
+
     def list_issue_comments(self, repo: str, number: int) -> list[JSON]:
         return self._paged(f"/repos/{repo}/issues/{number}/comments", {})
 
@@ -119,11 +128,6 @@ class LiveGitHubClient:
     def list_merged_pulls(self, repo: str, base_branch: str) -> list[JSON]:
         closed = self._paged(f"/repos/{repo}/pulls", {"state": "closed", "base": base_branch})
         return merged_in_order(closed)
-
-    def get_branch_sha(self, repo: str, branch: str) -> str:
-        data = self._get(f"/repos/{repo}/branches/{branch}")
-        sha: str = data["commit"]["sha"]
-        return sha
 
     def get_commit_parents(self, repo: str, sha: str) -> list[str]:
         data = self._get(f"/repos/{repo}/commits/{sha}")

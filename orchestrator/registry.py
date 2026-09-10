@@ -1,9 +1,13 @@
-"""Typed access to probes/registry.json: the committed issue -> probe mapping."""
+"""Typed access to probes/registry.json: the committed issue -> probe mapping.
+
+`IssueSpec` is also the schema of an entry: loading rejects a key the dataclass does not
+declare, so a field renamed here or in the JSON cannot drift silently past `ISSUES.md`.
+"""
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, fields
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -17,14 +21,6 @@ class Probe:
     id: str
     kind: str
     script: str
-
-    @property
-    def needs_running_app(self) -> bool:
-        return self.kind == "live_http"
-
-    @property
-    def needs_postgres(self) -> bool:
-        return self.kind in {"integration", "live_http"}
 
 
 @dataclass(frozen=True)
@@ -41,7 +37,6 @@ class IssueSpec:
     state_reason: str | None = None
     not_planned_reason: str | None = None
     triage_note: str | None = None
-    extra: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -63,8 +58,12 @@ class Registry:
 
 def load_registry(path: Path = REGISTRY_PATH) -> Registry:
     raw = json.loads(path.read_text())
+    known = {f.name for f in fields(IssueSpec)}
     issues: list[IssueSpec] = []
     for item in raw["issues"]:
+        unknown = sorted(set(item) - known)
+        if unknown:
+            raise ValueError(f"issue #{item['number']}: unknown registry keys {unknown}")
         probes = tuple(Probe(p["id"], p["kind"], p["script"]) for p in item.get("probes", []))
         for p in probes:
             if p.kind not in PROBE_KINDS:

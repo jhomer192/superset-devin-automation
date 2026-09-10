@@ -23,16 +23,11 @@ class Settings:
     verify_every_n_merges: int
     playbook_id_fix: str | None
     playbook_id_verify: str | None
+    report_digest_issue: int | None
+    report_digest_every_hours: int
+    acu_usd: float | None
     simulate: bool
     log_level: str
-
-    @property
-    def target_owner(self) -> str:
-        return self.target_repo.split("/", 1)[0]
-
-    @property
-    def target_name(self) -> str:
-        return self.target_repo.split("/", 1)[1]
 
     def require_live(self) -> None:
         missing = [
@@ -64,6 +59,12 @@ def load_settings(simulate: bool = False) -> Settings:
     every = int(env.get("VERIFY_EVERY_N_MERGES", "1") or 1)
     if every < 1:
         raise SystemExit("VERIFY_EVERY_N_MERGES must be >= 1")
+    digest_issue = env.get("REPORT_DIGEST_ISSUE", "").strip()
+    digest_hours = int(env.get("REPORT_DIGEST_EVERY_HOURS", "24") or 24)
+    if digest_hours < 1:
+        raise SystemExit("REPORT_DIGEST_EVERY_HOURS must be >= 1")
+    # The API bills in ACUs and quotes no price, so money is only reported at a rate given here.
+    rate = env.get("ACU_USD", "").strip()
     return Settings(
         devin_api_base=env.get("DEVIN_API_BASE", "https://api.devin.ai").rstrip("/"),
         # the second names are the Devin secret names this loop is provisioned with
@@ -77,6 +78,9 @@ def load_settings(simulate: bool = False) -> Settings:
         verify_every_n_merges=every,
         playbook_id_fix=env.get("PLAYBOOK_ID_FIX") or None,
         playbook_id_verify=env.get("PLAYBOOK_ID_VERIFY") or None,
+        report_digest_issue=int(digest_issue) if digest_issue else None,
+        report_digest_every_hours=digest_hours,
+        acu_usd=float(rate) if rate else None,
         simulate=simulate or env.get("SIMULATE", "").lower() in {"1", "true", "yes"},
         log_level=env.get("LOG_LEVEL", "INFO"),
     )

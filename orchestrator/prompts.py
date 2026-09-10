@@ -36,6 +36,7 @@ Workflow:
    anywhere (no Co-Authored-By, no "Generated with").
 
 Structured output rules (enforced by schema):
+- every status: include the issue number given in the prompt as `issue`.
 - status "pr_opened": include pr_url, branch, acceptance_met=true, probe_command, probe_exit_code=0,
   base_probe_exit_code (non-zero), and evidence (the tail of the probe output at head and base).
 - status "no_change_needed": only if the probes already pass at master; include the same fields.
@@ -98,6 +99,56 @@ Deciding probes:
 """
     body = "" if playbook_id else "\n" + FIX_PLAYBOOK_BODY
     return f"{_header(target_repo, playbook_id)}\n\n{variables}{body}"
+
+
+def regression_fix_prompt(
+    *,
+    target_repo: str,
+    automation_repo: str,
+    issue_number: int,
+    issue_url: str,
+    pr_url: str,
+    head_sha: str,
+    probes: list[str],
+) -> str:
+    probe_lines = "\n".join(f"  - {p}" for p in probes)
+    return f"""@{target_repo}
+
+Fix GitHub issue #{issue_number} in {target_repo}: a probe fails on master after {pr_url} merged.
+
+Issue URL: {issue_url}
+Failing commit: {head_sha}
+Failing probes (deciding; they live in https://github.com/{automation_repo}):
+{probe_lines}
+
+Read the issue body first; its acceptance criteria are binding.
+
+Workflow:
+1. Clone {target_repo} at master and https://github.com/{automation_repo} next to it. Create a
+   branch. Install requirements/development.txt into a venv. Never push to master.
+2. Reproduce first: run each failing probe with SUPERSET_SRC pointing at your checkout and
+   PROBE_PYTHON at the venv python. Every one MUST exit non-zero before you change anything;
+   record those exit codes for base_probe_exit_code. If they all pass, the regression is already
+   gone: report status "no_change_needed" with that evidence and open no PR.
+3. Implement the smallest fix that addresses the cause, not the symptom. Follow AGENTS.md in the
+   superset repo (ASF headers, type hints, pre-commit on changed files).
+4. Add or extend a unit test under superset/tests/unit_tests/ that fails without your fix.
+5. Re-run every failing probe (all MUST exit 0), the test file you touched, and the surrounding
+   unit-test directory so you know the fix broke nothing else. Do not edit anything under the
+   probes/ tree of {automation_repo}; if a probe is wrong, stop and report status "error".
+6. Only once step 5 is green, open a pull request against {target_repo} master whose body
+   contains the line "Closes #{issue_number}", the probe exit codes before and after, and the
+   test command output. PR title in Conventional Commits form. No AI-attribution footers.
+
+Structured output rules (enforced by schema):
+- every status: include issue={issue_number}.
+- status "pr_opened": include pr_url, branch, acceptance_met=true, probe_command, probe_exit_code=0,
+  base_probe_exit_code (non-zero), and evidence (probe output at base and head plus the test run).
+- status "no_change_needed": only when the probes already pass before any change; include the same
+  fields.
+- status "error": include error_message only; do NOT include acceptance_met or pr_url.
+acceptance_met is the probe's exit code being 0, nothing else.
+"""
 
 
 def verification_command(target_repo: str, head_sha: str, base_sha: str, issue_numbers: list[int]) -> str:
