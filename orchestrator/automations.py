@@ -30,7 +30,7 @@ REPORT_NAME = "superset-devin-automation: REPORT (publish session outcomes)"
 GIT_MANAGER_NET_POLICY = {"allow": [{"hostname": "git-manager.devin.ai"}]}
 
 
-def _shim(automation_repo: str, command: str, env_lines: str) -> str:
+def _shim(automation_repo: str, command: str) -> str:
     return f"""@{automation_repo}
 
 You are the thin dispatch shim for the superset-devin-automation loop. Do not reason about the
@@ -38,8 +38,10 @@ issues yourself; the orchestrator does that.
 
 1. git clone https://github.com/{automation_repo} && cd superset-devin-automation
 2. python -m pip install -e .
-3. Export credentials from the session secrets:
-{env_lines}
+3. Credentials: the org session secrets `superset_remediation_bot` (Devin API key) and
+   `superset_github_key` (GitHub token) are already environment variables; the orchestrator reads
+   them by those names and has the org id built in. Do not look for other names; if one of the two
+   is missing, run the command anyway and report its error verbatim.
 4. Run: {command}
 5. Report the command's JSON output verbatim and exit. Do not open PRs, do not edit code.
 """
@@ -54,7 +56,6 @@ def map_payload(target_repo: str, automation_repo: str, playbook_id_fix: str | N
         _shim(
             automation_repo,
             _env_prefix("PLAYBOOK_ID_FIX", playbook_id_fix) + "python -m orchestrator map",
-            "   DEVIN_API_KEY, DEVIN_ORG_ID, GITHUB_TOKEN (already in the environment as session secrets)",
         )
         + f"\nTarget repository for issues: @{target_repo}\n"
     )
@@ -100,7 +101,6 @@ def reduce_payload(
             + _env_prefix("PLAYBOOK_ID_VERIFY", playbook_id_verify)
             + "python -m orchestrator reduce --event-json event.json  "
             "(first write the appended pull_request event payload to event.json, unmodified)",
-            "   DEVIN_API_KEY, DEVIN_ORG_ID, GITHUB_TOKEN (already in the environment as session secrets)",
         )
         + f"\nTarget repository: @{target_repo}\n"
         + f"Cadence: the orchestrator only starts a verification session for every {every_n}th PR "
@@ -155,7 +155,6 @@ def report_payload(
         _shim(
             automation_repo,
             f"{digest_env}REPORT_DIGEST_EVERY_HOURS={digest_every_hours} python -m orchestrator report",
-            "   DEVIN_API_KEY, DEVIN_ORG_ID, GITHUB_TOKEN (already in the environment as session secrets)",
         )
         + f"\nTarget repository: @{target_repo}\n"
         + "The command publishes the outcome of every finished fix/verification session to the "

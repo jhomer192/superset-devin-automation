@@ -92,7 +92,10 @@ docker compose run --rm orchestrator metrics --days 30
 
 Inside a Devin session the same values are available as the org secret
 `superset_remediation_bot` (Devin API key, service user `superset-remediation-bot`) and the
-personal secret `superset_github_key` (GitHub PAT for `jhomer192`). `register` and
+secret `superset_github_key` (GitHub PAT for `jhomer192`). Sessions the automations start read
+those two names, so both must have org access, and the Devin GitHub app must be installed on the
+target repository (or `github:pull_request` never fires) and on this one (or the shim's clone is
+refused). `register` and
 `register-playbooks` are idempotent: they update by automation name / playbook title
 (`PUT`) rather than creating duplicates.
 
