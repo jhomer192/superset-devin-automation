@@ -35,6 +35,14 @@ Workflow:
    "Closes #<issue number>". PR title in Conventional Commits form. No AI-attribution footers
    anywhere (no Co-Authored-By, no "Generated with").
 
+Writing rules for everything you author (commit messages, PR body, code comments, docstrings):
+- Say what changed and why, once. No summary or "Overall" paragraph restating the diff, no
+  padded bullet lists.
+- No negative parallelism ("not just X, it is Y"), no chiasmus or rhetorical mirroring.
+- Do not repeat a rule verbatim that the codebase already states; reference it.
+- Claim only what you ran. If a check ran in a narrower scope than the sentence implies, say
+  which scope.
+
 Structured output rules (enforced by schema):
 - every status: include the issue number given in the prompt as `issue`.
 - status "pr_opened": include pr_url, branch, acceptance_met=true, probe_command, probe_exit_code=0,
@@ -139,6 +147,10 @@ Workflow:
 6. Only once step 5 is green, open a pull request against {target_repo} master whose body
    contains the line "Closes #{issue_number}", the probe exit codes before and after, and the
    test command output. PR title in Conventional Commits form. No AI-attribution footers.
+7. Writing rules for the commit message, PR body and any comments: state what changed and why
+   once, with no summary paragraph or padded lists; no negative parallelism ("not just X, it is
+   Y") or rhetorical mirroring; do not restate rules the codebase already carries; claim only
+   what you ran, and say the scope if it was narrower than the sentence implies.
 
 Structured output rules (enforced by schema):
 - every status: include issue={issue_number}.
