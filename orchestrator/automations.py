@@ -31,7 +31,6 @@ from .devin_api import DevinClient
 from .regression import REGRESSION_LABEL
 
 SCHEMAS_PATH = Path(__file__).with_name("v3_schemas.json")
-FRIDAY_RRULE = "FREQ=WEEKLY;BYDAY=FR"
 FINDER_NAME = "superset issue finder and fixer"
 RETIRED_NAMES = (
     "superset-devin-automation: AUTOPR (Friday ready-issue sweep)",
