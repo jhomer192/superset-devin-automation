@@ -212,7 +212,6 @@ def test_reduce_dedups_on_pr_url_and_merge_sha(registry, world):
 
     other = copy.deepcopy(load_event())
     other["pull_request"]["merge_commit_sha"] = "3" * 40
-    gh.parents["3" * 40] = ["4" * 40]
     second = do_reduce(devin, gh, registry, other)
     assert second.session_id != first.session_id
 
@@ -1266,7 +1265,6 @@ def test_registry_maps_every_prd_requirement_to_known_probes(registry):
         assert req.probes, req.id
         assert all(p in known for p in req.probes), req.id
     assert known["prd/health"][0] == 0 and known["issue_1/unit"][0] == 1
-    assert registry.requirements_of("issue_1/unit") == ["PRD-SEC-1"]
     ids = [p.id for _, p in registry.requirement_probes(["PRD-SEC-1", "PRD-OPS-1"])]
     assert ids == ["issue_1/unit", "issue_1/startup_log", "prd/health"]
 

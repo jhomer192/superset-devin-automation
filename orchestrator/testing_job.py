@@ -9,7 +9,7 @@ Cadence: only PRs merged into `verify_branch` count. The trigger fires on every 
 Automations API has no counter), so the counter is derived from GitHub itself: this PR's
 position k among all PRs ever merged into the branch. When k % every_n != 0 the run records
 "merge k, deferred" on the PR and exits; otherwise it verifies the window of the last `every_n`
-merges, with BASE = the first parent of the oldest merge in the window.
+merges at HEAD.
 """
 
 from __future__ import annotations

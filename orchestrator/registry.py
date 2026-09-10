@@ -60,14 +60,6 @@ class Registry:
     def by_number(self, number: int) -> IssueSpec | None:
         return next((i for i in self.issues if i.number == number), None)
 
-    def probes_for(self, numbers: list[int]) -> list[Probe]:
-        out: list[Probe] = []
-        for n in numbers:
-            spec = self.by_number(n)
-            if spec:
-                out.extend(spec.probes)
-        return out
-
     def all_probes(self) -> dict[str, tuple[int, Probe]]:
         """Every probe by id with the issue it belongs to (0 for a PRD-only probe)."""
         out: dict[str, tuple[int, Probe]] = {}
@@ -80,9 +72,6 @@ class Registry:
 
     def requirement_ids(self) -> list[str]:
         return [r.id for r in self.requirements]
-
-    def requirements_of(self, probe_id: str) -> list[str]:
-        return [r.id for r in self.requirements if probe_id in r.probes]
 
     def requirement_probes(self, ids: list[str]) -> list[tuple[int, Probe]]:
         """Probes for the named requirements in registry order, each once."""

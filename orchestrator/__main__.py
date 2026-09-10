@@ -288,7 +288,7 @@ def main(argv: list[str] | None = None) -> int:
         help="merged-PR event: verify, fix every recent regression issue, wait for all, report",
     )
     p_cycle.add_argument("--event-json", type=Path, default=None)
-    p_reg = sub.add_parser("register", help="create/update the find-and-fix and AUTOPR automations")
+    p_reg = sub.add_parser("register", help="create/update the find-and-fix automation")
     p_reg.add_argument("--dry-run", action="store_true")
     p_pb = sub.add_parser(
         "register-playbooks", help="create/update the remediation and verification playbooks"

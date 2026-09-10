@@ -45,7 +45,7 @@ prompt that is the same on every run:
 
 | Playbook | Body (`orchestrator/prompts.py`) | Attached schema | Used by |
 |----------|----------------------------------|-----------------|---------|
-| `superset-devin-automation: remediation` | `FIX_PLAYBOOK_BODY`: clone at master, branch, venv from `requirements/development.txt`, run every deciding probe and require non-zero at base, minimal fix following the fork's `AGENTS.md`, re-run probes and require 0, PR body with `Closes #NN`, Conventional Commits title, no AI attribution | `FIX_SCHEMA` | fix sessions started by AUTOPR's Friday sweep |
+| `superset-devin-automation: remediation` | `FIX_PLAYBOOK_BODY`: clone at master, branch, venv from `requirements/development.txt`, run every deciding probe and require non-zero at base, minimal fix following the fork's `AGENTS.md`, re-run probes and require 0, PR body with `Closes #NN`, Conventional Commits title, no AI attribution | `FIX_SCHEMA` | fix sessions started by find-and-fix (and the manual `autopr` sweep) |
 | `superset-devin-automation: verification` | `VERIFY_PLAYBOOK_BODY`: clone this repo, run `verify/run_all.sh` with the given repo/head/requirements, copy the resulting verify/out/result.json into the structured output verbatim, never modify `probes/` or `verify/`, no PR | `VERIFICATION_SCHEMA` | verification sessions started by TESTING |
 
 The per-session prompt is then only the variables: the `@owner/repo` token, the

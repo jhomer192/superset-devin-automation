@@ -167,7 +167,6 @@ class FakeGitHub:
     issues: dict[int, JSON] = field(default_factory=dict)
     comments: dict[int, list[JSON]] = field(default_factory=dict)
     pulls: dict[int, JSON] = field(default_factory=dict)
-    parents: dict[str, list[str]] = field(default_factory=dict)
     branch_heads: dict[str, str] = field(default_factory=dict)
     _n: int = 0
 
@@ -179,7 +178,6 @@ class FakeGitHub:
         event = json.loads((root / "merged_pr_event.json").read_text())
         pr = event["pull_request"]
         gh.pulls[int(pr["number"])] = pr
-        gh.parents[pr["merge_commit_sha"]] = [pr["base"]["sha"]]
         gh.branch_heads[pr["base"]["ref"]] = pr["merge_commit_sha"]
         return gh
 
@@ -197,7 +195,6 @@ class FakeGitHub:
             "merge_commit_sha": sha,
             "base": {"ref": branch, "sha": self.branch_heads.get(branch, "")},
         }
-        self.parents[sha] = [self.branch_heads[branch]] if branch in self.branch_heads else []
         self.branch_heads[branch] = sha
         self.pulls[number] = pr
         return dict(pr)
@@ -261,9 +258,6 @@ class FakeGitHub:
         return merged_in_order(
             [dict(p) for p in self.pulls.values() if (p.get("base") or {}).get("ref") == base_branch]
         )
-
-    def get_commit_parents(self, repo: str, sha: str) -> list[str]:
-        return list(self.parents.get(sha, []))
 
     def label(self, number: int, name: str) -> None:
         labels = self.issues[number].setdefault("labels", [])

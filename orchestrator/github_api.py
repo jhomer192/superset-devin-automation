@@ -63,8 +63,6 @@ class GitHubClient(Protocol):
         """Every PR merged into base_branch, oldest merge first."""
         ...
 
-    def get_commit_parents(self, repo: str, sha: str) -> list[str]: ...
-
 
 class LiveGitHubClient:
     def __init__(self, token: str, api_base: str = "https://api.github.com") -> None:
@@ -138,7 +136,3 @@ class LiveGitHubClient:
     def list_merged_pulls(self, repo: str, base_branch: str) -> list[JSON]:
         closed = self._paged(f"/repos/{repo}/pulls", {"state": "closed", "base": base_branch})
         return merged_in_order(closed)
-
-    def get_commit_parents(self, repo: str, sha: str) -> list[str]:
-        data = self._get(f"/repos/{repo}/commits/{sha}")
-        return [p["sha"] for p in data.get("parents", [])]
