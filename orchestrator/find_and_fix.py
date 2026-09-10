@@ -1,6 +1,7 @@
 """find-and-fix: the whole loop in one invocation, run to completion.
 
     verify the merge window (TESTING)            -> regression issues, labelled
+    explore the same HEAD for new defects        -> `sda-candidate` issues for a human to promote
     every `sda-regression` issue opened in the
     last N hours without a fix in flight         -> one fix session each
     wait for all of them (none is fine)          -> one find-and-fix report on the status issue
@@ -20,12 +21,13 @@ from typing import Any
 
 from .autopr_job import AutoprReport, _in_flight_reason, publish_fixes
 from .devin_api import DevinClient
+from .explore import ExploreReport, exploration_lines, run_exploration
 from .github_api import GitHubClient
 from .ledger import IssueLedger
 from .registry import Registry
 from .regression import REGRESSION_LABEL, regression_record, start_regression_fix
 from .status import autopr_lines, post_run
-from .testing_job import TestingReport, run_testing
+from .testing_job import TestingReport, dedup_key, run_testing
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +40,7 @@ class FinderReport:
     issue_window_hours: int = DEFAULT_ISSUE_WINDOW_HOURS
     candidates: list[int] = field(default_factory=list)
     fixes: dict[str, Any] = field(default_factory=dict)
+    exploration: dict[str, Any] = field(default_factory=dict)
     status_issue: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
@@ -131,6 +134,7 @@ def run_find_and_fix(
     every_n: int,
     issue_window_hours: int = DEFAULT_ISSUE_WINDOW_HOURS,
     playbook_id: str | None = None,
+    explore: bool = True,
     wait: bool = True,
     sleep: Callable[[float], None] = time.sleep,
     now: datetime | None = None,
@@ -152,6 +156,20 @@ def run_find_and_fix(
     report.testing = testing.as_dict()
     if not wait:
         return report
+    # started before the fixes so both run at once; collected after they have all finished
+    ledger = IssueLedger(gh, target_repo)
+    explore_kwargs: dict[str, Any] = {
+        "devin": devin,
+        "gh": gh,
+        "registry": registry,
+        "ledger": ledger,
+        "target_repo": target_repo,
+        "automation_repo": automation_repo,
+        "testing": testing,
+        "explore": explore,
+        "sleep": sleep,
+    }
+    exploration = explore_after_verification(wait=False, **explore_kwargs)
     filed = testing.regression_filed or {}
     report.candidates, fixes = fix_recent_regressions(
         devin=devin,
@@ -165,6 +183,9 @@ def run_find_and_fix(
         include=[int(filed["issue"])] if filed.get("issue") else (),
     )
     report.fixes = fixes.as_dict()
+    if exploration.session_id:
+        exploration = explore_after_verification(wait=True, **explore_kwargs)
+    report.exploration = exploration.as_dict()
     # keyed by the verification alone: a replayed find-and-fix for the same merge reports nothing twice
     session_ids = [testing.session_id] if testing.session_id else []
     verdict = testing.verdict or testing.skipped_reason or "no verification this merge"
@@ -176,6 +197,7 @@ def run_find_and_fix(
         f"regression issues opened in the last {issue_window_hours}h: "
         + (", ".join(f"#{n}" for n in report.candidates) or "none"),
         *autopr_lines("find-and-fix", fixes.finished, 0, len(fixes.skipped_in_flight)),
+        *exploration_lines(exploration),
     ]
     report.status_issue = post_run(
         gh,
@@ -189,7 +211,46 @@ def run_find_and_fix(
             "regression_issue": filed.get("issue"),
             "candidates": report.candidates,
             "fixes": fixes.finished,
+            "exploration_session": exploration.session_id,
+            "candidates_filed": [row["issue"] for row in exploration.filed],
         },
         lines,
     )
     return report
+
+
+def explore_after_verification(
+    *,
+    devin: DevinClient,
+    gh: GitHubClient,
+    registry: Registry,
+    ledger: IssueLedger,
+    target_repo: str,
+    automation_repo: str,
+    testing: TestingReport,
+    explore: bool,
+    wait: bool,
+    sleep: Callable[[float], None],
+) -> ExploreReport:
+    """Explore the verified HEAD once the verification has produced a verdict on a booted build."""
+    if not explore:
+        return ExploreReport(skipped_reason="EXPLORE_AFTER_VERIFY=0")
+    if not testing.session_id or testing.verdict is None:
+        return ExploreReport(skipped_reason="no verification this merge")
+    if testing.verdict not in {"acceptance met", "acceptance NOT met"}:
+        return ExploreReport(skipped_reason=f"verification ended in {testing.verdict}")
+    pr_number = int(testing.pr_url.rstrip("/").rsplit("/", 1)[-1])
+    return run_exploration(
+        devin=devin,
+        gh=gh,
+        registry=registry,
+        ledger=ledger,
+        target_repo=target_repo,
+        automation_repo=automation_repo,
+        pr_number=pr_number,
+        pr_url=testing.pr_url,
+        head_sha=testing.merge_commit_sha,
+        key=dedup_key(testing.pr_url, testing.merge_commit_sha),
+        wait=wait,
+        sleep=sleep,
+    )

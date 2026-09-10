@@ -28,6 +28,7 @@ from typing import Any
 from jsonschema import Draft202012Validator
 
 from .devin_api import DevinClient
+from .explore import CANDIDATE_LABEL
 from .regression import REGRESSION_LABEL
 
 SCHEMAS_PATH = Path(__file__).with_name("v3_schemas.json")
@@ -89,12 +90,19 @@ def finder_payload(
     issue_window_hours: int = 24,
     playbook_id_verify: str | None = None,
     playbook_id_fix: str | None = None,
+    explore: bool = True,
 ) -> dict[str, Any]:
+    exploring = (
+        f"After a verification it also starts one exploratory session on the same HEAD that files "
+        f"reproduced, previously unknown defects as `{CANDIDATE_LABEL}` issues for a human to promote. "
+        if explore
+        else ""
+    )
     prompt = (
         _shim(
             automation_repo,
             f"VERIFY_BRANCH={verify_branch} VERIFY_EVERY_N_MERGES={every_n} "
-            f"REGRESSION_ISSUE_WINDOW_HOURS={issue_window_hours} "
+            f"REGRESSION_ISSUE_WINDOW_HOURS={issue_window_hours} EXPLORE_AFTER_VERIFY={int(explore)} "
             + _env_prefix("PLAYBOOK_ID_VERIFY", playbook_id_verify)
             + _env_prefix("PLAYBOOK_ID_FIX", playbook_id_fix)
             + "python -m orchestrator find-and-fix --event-json event.json  "
@@ -106,7 +114,7 @@ def finder_payload(
         "blocks until that verification finishes, posts the verdict on every PR of the window, files a "
         f"`{REGRESSION_LABEL}` issue if it failed, starts one fix session per `{REGRESSION_LABEL}` issue "
         f"opened in the last {issue_window_hours}h, waits for all of them and appends the run report to "
-        "the status issue. It can run for hours. Do not interrupt it.\n"
+        f"the status issue. {exploring}It can run for hours. Do not interrupt it.\n"
     )
     return {
         "name": FINDER_NAME,
@@ -118,6 +126,7 @@ def finder_payload(
             "verify_branch": verify_branch,
             "verify_every_n_merges": str(every_n),
             "issue_window_hours": str(issue_window_hours),
+            "explore_after_verify": str(int(explore)),
             "playbook_id_verify": playbook_id_verify or "",
             "playbook_id_fix": playbook_id_fix or "",
         },
@@ -189,6 +198,7 @@ def register(
     verify_branch: str = "master",
     every_n: int = 1,
     issue_window_hours: int = 24,
+    explore: bool = True,
     playbook_id_fix: str | None = None,
     playbook_id_verify: str | None = None,
     dry_run: bool = False,
@@ -209,6 +219,7 @@ def register(
             issue_window_hours,
             playbook_id_verify,
             playbook_id_fix,
+            explore=explore,
         ),
     )
     for payload in payloads:

@@ -118,6 +118,7 @@ def cmd_find_and_fix(
         every_n=settings.verify_every_n_merges,
         issue_window_hours=settings.regression_issue_window_hours,
         playbook_id=settings.playbook_id_verify,
+        explore=settings.explore_after_verify,
         **kwargs,
     ).as_dict()
 
@@ -130,6 +131,7 @@ def cmd_register(settings: Settings, devin: DevinClient, dry_run: bool) -> list[
         verify_branch=settings.verify_branch,
         every_n=settings.verify_every_n_merges,
         issue_window_hours=settings.regression_issue_window_hours,
+        explore=settings.explore_after_verify,
         playbook_id_fix=settings.playbook_id_fix,
         playbook_id_verify=settings.playbook_id_verify,
         dry_run=dry_run,

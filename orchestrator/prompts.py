@@ -173,6 +173,64 @@ acceptance_met is the probe's exit code being 0, nothing else.
 """
 
 
+def exploration_prompt(
+    *,
+    target_repo: str,
+    automation_repo: str,
+    head_sha: str,
+    pr_url: str,
+    known: list[tuple[int, str]],
+) -> str:
+    known_lines = "\n".join(f"  - #{n}: {title}" for n, title in known) or "  (none)"
+    return f"""@{target_repo}
+
+Exploratory issue finding on {target_repo} at {head_sha} (HEAD after {pr_url} merged).
+
+Automation repository: https://github.com/{automation_repo}
+Already tracked (do not refile these or anything the same probe would catch):
+{known_lines}
+
+You are looking for defects nobody has filed yet. You report candidates; you do not fix anything,
+open PRs, or file issues yourself. The orchestrator files each candidate as an `sda-candidate`
+issue for a human to promote; only a promoted issue is ever fixed or guarded by the loop.
+
+Workflow:
+1. Clone {target_repo} at {head_sha} and https://github.com/{automation_repo} next to it. Read
+   AGENTS.md and SECURITY.md in the superset checkout; the role and capability matrix in
+   SECURITY.md decides what counts as a security finding.
+2. Install requirements/development.txt into a venv. Bring up Postgres and Redis in docker, run
+   `superset db upgrade`, `superset init`, `superset load-test-users`, then `superset run` and
+   wait for `/health`. If the app will not boot, report status "ok" with booted=false and the
+   boot log as evidence and no candidates; do not guess at defects from source alone.
+3. Explore the running app as each role SECURITY.md defines (Admin, Alpha, Gamma, Public where
+   enabled): login, dashboards, charts and explore, SQL Lab, dataset and database CRUD, the REST
+   API under /api/v1, CSV and image export, embedded and guest-token flows if configured. Read the
+   server log for tracebacks and WARNING/ERROR records while you do. Run the unit-test lane for
+   any module you suspect. Cover what you can; list what you covered in areas_covered.
+4. A candidate needs a real reproduction on this checkout: the exact request, SQL, config or UI
+   steps, the output you got, and the output the code or docs say you should get. Something you
+   only reasoned about from source is not a candidate. Prefer fewer, reproduced findings over
+   many suspicions. Skip style, naming, and anything AGENTS.md or SECURITY.md declares out of
+   scope. For a security candidate, name the SECURITY.md matrix row it violates and the
+   attacker role you held.
+5. For each candidate write a probe script in the shape of the probes under probes/ in the
+   automation checkout (bash, `source ../lib.sh`, exit 0 when the defect is fixed and non-zero
+   while it is present) and run it: it MUST exit non-zero on this checkout. Put the script text
+   in probe_script and its kind in probe_kind.
+6. fingerprint is a stable lowercase slug for the defect (module and symptom, e.g.
+   `sqllab-csv-export-ignores-row-limit`); two runs that find the same defect must produce the
+   same fingerprint.
+
+Structured output rules (enforced by schema):
+- status "ok": head_sha, booted, areas_covered, candidates (may be empty), evidence (boot log
+  tail and the commands you ran).
+- status "error": error_message only, when the checkout or the environment could not be set up.
+Anything you write: what you did and observed, once, in the scope you observed it. No summary
+paragraphs, no negative parallelism ("not just X, it is Y"), no claims about checks you did not
+run.
+"""
+
+
 def verification_command(target_repo: str, head_sha: str, base_sha: str, issue_numbers: list[int]) -> str:
     issues = ",".join(str(n) for n in issue_numbers)
     return f'verify/run_all.sh --repo {target_repo} --head {head_sha} --base {base_sha} --issues "{issues}"'

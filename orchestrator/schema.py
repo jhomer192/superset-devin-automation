@@ -121,6 +121,66 @@ FIX_SCHEMA: dict[str, Any] = {
 }
 
 
+_CANDIDATE = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "fingerprint",
+        "title",
+        "category",
+        "severity",
+        "location",
+        "repro",
+        "expected",
+        "actual",
+        "evidence",
+        "probe_kind",
+        "probe_script",
+    ],
+    "properties": {
+        "fingerprint": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,79}$"},
+        "title": {"type": "string", "minLength": 8, "maxLength": 160},
+        "category": {"type": "string", "enum": ["security", "bug", "performance", "code-quality"]},
+        "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+        "location": {"type": "string", "minLength": 1, "maxLength": 400},
+        "security_matrix_row": {"type": "string", "minLength": 1, "maxLength": 200},
+        "attacker_role": {"type": "string", "minLength": 1, "maxLength": 80},
+        "repro": {"type": "string", "minLength": 1, "maxLength": 8000},
+        "expected": {"type": "string", "minLength": 1, "maxLength": 2000},
+        "actual": {"type": "string", "minLength": 1, "maxLength": 2000},
+        "evidence": {"type": "string", "minLength": 1, "maxLength": 20000},
+        "probe_kind": {
+            "type": "string",
+            "enum": ["offline_pytest", "offline_static", "log_assertion", "integration", "live_http"],
+        },
+        "probe_script": {"type": "string", "minLength": 1, "maxLength": 20000},
+    },
+}
+
+EXPLORE_SCHEMA: dict[str, Any] = {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "SupersetExplorationResult",
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["status", "head_sha"],
+    "properties": {
+        "status": {"type": "string", "enum": ["ok", "error"]},
+        "head_sha": _SHA,
+        "error_message": {"type": "string", "minLength": 1, "maxLength": 20000},
+        "booted": {"type": "boolean"},
+        "areas_covered": {"type": "array", "items": {"type": "string", "minLength": 1}, "maxItems": 50},
+        "candidates": {"type": "array", "items": _CANDIDATE, "maxItems": 10},
+        "evidence": {"type": "string", "minLength": 1, "maxLength": 60000},
+    },
+    "if": {"properties": {"status": {"const": "error"}}},
+    "then": {"required": ["error_message"], "not": {"required": ["candidates"]}},
+    "else": {
+        "required": ["booted", "areas_covered", "candidates", "evidence"],
+        "not": {"required": ["error_message"]},
+    },
+}
+
+
 def check_schema(schema: dict[str, Any]) -> None:
     """Fail loudly if a schema breaks the v3 constraints."""
     Draft7Validator.check_schema(schema)

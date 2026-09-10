@@ -17,6 +17,8 @@ PR merges into master ──► find-and-fix (one invocation, one daemon-style p
    2. acceptance_met == false ──► regression issues labelled `sda-regression`
    3. every open `sda-regression` issue opened in the last REGRESSION_ISSUE_WINDOW_HOURS
       (default 24) that has no fix in flight ──► one fix session each, on its own VM
+      in parallel: EXPLORE, one exploratory session on the same HEAD ──► reproduced, previously
+      unknown defects filed as `sda-candidate` issues (see "Finding new issues")
    4. wait for all of them (zero is fine) ──► verdict, PR and ACUs on each issue
    5. one find-and-fix report on the `sda-status` issue ──► fix PRs merge ──► back to 1
 ```
@@ -213,6 +215,32 @@ verdict, per-probe BASE/HEAD exit codes, ACUs and session URL on every PR of the
 `acceptance_met == false` the regression issue (see Self-healing). Every comment is keyed by
 session id in its marker, so a replayed event posts nothing twice.
 
+## Finding new issues (EXPLORE)
+
+Verification only checks what `probes/registry.json` already names. After each verification that
+reached a verdict (pass or fail; not a build error), find-and-fix starts one exploratory session
+(`orchestrator/explore.py`, prompt in `prompts.exploration_prompt`, tagged `sda-explore`) on the
+same merge commit, alongside the fix sessions. That session boots Superset, walks the app as each
+role in Superset's `SECURITY.md`, reads the server log, and reports candidates under
+`EXPLORE_SCHEMA`. A candidate has to carry a reproduction on that checkout (request, expected,
+actual, evidence) and a probe script in the `probes/` shape that the session ran and saw exit
+non-zero; a security candidate also names the `SECURITY.md` matrix row and the attacker role. The
+session files nothing itself.
+
+The orchestrator files each candidate as an issue labelled `sda-candidate` plus its category, with
+the reproduction, the proposed probe and promotion steps in the body and a `candidate_filed` ledger
+comment carrying the candidate's `fingerprint` (a stable slug for the defect). A later exploration
+that reports a fingerprint an open `sda-candidate` issue already carries adds a `candidate_seen`
+comment there instead of filing; a closed candidate does not count, so the same fingerprint after
+closure files again. One exploration per verified merge: a replayed event finds the
+`exploration_started` record on the PR and reuses that session.
+
+A candidate is not a regression. `fix_recent_regressions` reads `sda-regression` only, so nothing
+fixes or guards a candidate until a human promotes it: save the probe under `probes/issue_<n>/`,
+add the issue and probe to `probes/registry.json`, regenerate `ISSUES.md`, merge. From then on
+`autopr` can start its fix session and every verification guards the probe. `EXPLORE_AFTER_VERIFY=0`
+turns the tier off; like the cadence values it is baked in at `register`.
+
 ## Probes
 
 Each probe is a committed script under `probes/`; only its exit code is read. `probes/run.sh
@@ -232,7 +260,7 @@ line, its deciding probe, and its closing PR or not-planned reason. It is genera
 
 ## Structured output
 
-`orchestrator/schema.py` defines `FIX_SCHEMA` and `VERIFICATION_SCHEMA` (JSON Schema draft-07,
+`orchestrator/schema.py` defines `FIX_SCHEMA`, `VERIFICATION_SCHEMA` and `EXPLORE_SCHEMA` (JSON Schema draft-07,
 self-contained, no `$ref`, well under 64 KB, `additionalProperties: false` everywhere). The
 taxonomy is machine-enforced with `if/then/else`: when `status == "error"` the payload must
 carry `error_message` and must **not** carry `acceptance_met`; otherwise `acceptance_met`,
@@ -276,7 +304,7 @@ The command's own JSON output (`TestingReport`, `AutoprReport`) is what the auto
 prints, so the invocation list on the automation page shows the same decisions: `merge_index`,
 `skipped_reason`, `verdict`, `posted_to`, `regression_filed`, `started`, `skipped_in_flight`,
 `finished` (session id, status, verdict, PR URL, ACUs per fix session). Sessions are tagged
-`sda-verify` / `sda-fix` / `sda-regression` / `issue-<n>`, so the sessions list filtered by tag is
+`sda-verify` / `sda-fix` / `sda-explore` / `sda-regression` / `issue-<n>`, so the sessions list filtered by tag is
 the live view of what is running.
 
 Waiting inside the run is the mechanism because automations have no completion callback — the

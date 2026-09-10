@@ -22,6 +22,7 @@ class Settings:
     verify_branch: str
     verify_every_n_merges: int
     regression_issue_window_hours: int
+    explore_after_verify: bool
     playbook_id_fix: str | None
     playbook_id_verify: str | None
     simulate: bool
@@ -72,6 +73,7 @@ def load_settings(simulate: bool = False) -> Settings:
         verify_branch=env.get("VERIFY_BRANCH", "master"),
         verify_every_n_merges=every,
         regression_issue_window_hours=window_hours,
+        explore_after_verify=env.get("EXPLORE_AFTER_VERIFY", "1").lower() not in {"0", "false", "no"},
         playbook_id_fix=env.get("PLAYBOOK_ID_FIX") or None,
         playbook_id_verify=env.get("PLAYBOOK_ID_VERIFY") or None,
         simulate=simulate or env.get("SIMULATE", "").lower() in {"1", "true", "yes"},

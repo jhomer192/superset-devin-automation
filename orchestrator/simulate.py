@@ -93,7 +93,7 @@ class FakeDevin:
         """Drive a session to a terminal state with a schema-valid structured output."""
         s = self.sessions[session_id]
         schema = s["structured_output_schema"]
-        kind = "fix" if "sda-fix" in s["tags"] else "verify"
+        kind = "fix" if "sda-fix" in s["tags"] else "explore" if "sda-explore" in s["tags"] else "verify"
         issue = next((int(t.split("-", 1)[1]) for t in s["tags"] if t.startswith("issue-")), 5)
         out = _outcome(kind, outcome, pr_url, issue)
         errors = validate(schema, out)
@@ -142,6 +142,28 @@ def _outcome(kind: str, outcome: str, pr_url: str | None, issue: int) -> JSON:
     head = "1111111111111111111111111111111111111111"
     if outcome == "error":
         return {"status": "error", "head_sha": head, "error_message": "simulated: postgres failed to start"}
+    if kind == "explore":
+        candidate = {
+            "fingerprint": "sqllab-csv-export-ignores-row-limit",
+            "title": "SQL Lab CSV export ignores SQL_MAX_ROW",
+            "category": "bug",
+            "severity": "medium",
+            "location": "superset/sqllab/api.py export_csv",
+            "repro": "GET /api/v1/sqllab/export/<client_id>/ with SQL_MAX_ROW=10 and a 100-row query",
+            "expected": "10 rows",
+            "actual": "100 rows",
+            "evidence": "simulated: wc -l export.csv -> 101",
+            "probe_kind": "live_http",
+            "probe_script": '#!/usr/bin/env bash\nsource "$(dirname "$0")/../lib.sh"\nexit 1\n',
+        }
+        return {
+            "status": "ok",
+            "head_sha": head,
+            "booted": True,
+            "areas_covered": ["login", "sqllab", "api/v1"],
+            "candidates": [candidate] if met else [],
+            "evidence": "simulated: app booted, /health 200",
+        }
     return {
         "status": "ok",
         "acceptance_met": met,

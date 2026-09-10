@@ -12,6 +12,7 @@ from orchestrator.github_api import closing_issue_numbers
 from orchestrator.ledger import IssueLedger, find
 from orchestrator.publish import publish_verification
 from orchestrator.registry import load_registry
+from orchestrator.schema import EXPLORE_SCHEMA, check_schema, validate
 from orchestrator.sessions import Liveness, classify, holds_slot, is_finished, wait_until_finished
 from orchestrator.simulate import FakeDevin, FakeGitHub, issue_event, load_event
 from orchestrator.testing_job import NotAMergedPR, extract_merged_pr, run_testing
@@ -1052,16 +1053,18 @@ def finish_everything(devin, fix_outcome="ok"):
 
 def do_finder(devin, gh, registry, **kwargs):
     return run_find_and_fix(
-        devin=devin,
-        gh=gh,
-        registry=registry,
-        target_repo=REPO,
-        automation_repo=AUTO,
-        event=load_event(),
-        verify_branch="master",
-        every_n=1,
-        sleep=finish_everything(devin),
-        **kwargs,
+        **{
+            "devin": devin,
+            "gh": gh,
+            "registry": registry,
+            "target_repo": REPO,
+            "automation_repo": AUTO,
+            "event": load_event(),
+            "verify_branch": "master",
+            "every_n": 1,
+            "sleep": finish_everything(devin),
+            **kwargs,
+        }
     )
 
 
@@ -1135,6 +1138,162 @@ def test_finder_on_an_uncounted_merge_only_counts(registry, world):
     )
     assert out.testing["session_id"] is None and out.testing["skipped_reason"]
     assert out.fixes["started"] == [] and out.status_issue is None and devin.sessions == {}
+
+
+# --- exploration ---------------------------------------------------------------------------------
+
+
+def finish_exploring(devin, explore_outcome="ok", verify_outcome="failed"):
+    """Sleep stand-in: the exploration reports one candidate (outcome "ok") or none ("failed")."""
+
+    def _sleep(_seconds):
+        for sid, session in list(devin.sessions.items()):
+            if session["structured_output"] is not None:
+                continue
+            if "sda-explore" in session["tags"]:
+                devin.advance(sid, outcome=explore_outcome, acus=7.0)
+            elif "sda-fix" in session["tags"]:
+                devin.advance(sid, outcome="ok", acus=2.0, pr_url=f"https://github.com/{REPO}/pull/99")
+            else:
+                devin.advance(sid, outcome=verify_outcome, acus=5.0)
+
+    return _sleep
+
+
+def explorations(devin):
+    return [s for s in devin.sessions.values() if "sda-explore" in s["tags"]]
+
+
+def candidate_issues(gh):
+    return gh.list_issues(REPO, "sda-candidate")
+
+
+def test_finder_explores_the_verified_head_and_files_each_candidate_once(registry, world):
+    devin, gh = world
+    out = do_finder(devin, gh, registry, sleep=finish_exploring(devin))
+    (session,) = explorations(devin)
+    assert out.exploration["session_id"] == session["session_id"]
+    assert session["structured_output_schema"]["title"] == "SupersetExplorationResult"
+    assert "structured_output_required" not in session or session["structured_output_required"]
+    prompt = session["prompt"]
+    assert load_event()["pull_request"]["merge_commit_sha"] in prompt and "SECURITY.md" in prompt
+    assert "do not fix anything" in prompt and "#5:" in prompt  # registry issues are listed as known
+    (issue,) = candidate_issues(gh)
+    labels = {lb["name"] for lb in issue["labels"]}
+    assert labels == {"sda-candidate", "bug"} and issue["title"].startswith("[bug/medium]")
+    assert "## Proposed probe" in issue["body"] and "## Promotion" in issue["body"]
+    (filed,) = out.exploration["filed"]
+    assert filed["issue"] == issue["number"] and filed["fingerprint"] == "sqllab-csv-export-ignores-row-limit"
+    record = find(IssueLedger(gh, REPO).read(issue["number"]), "candidate_filed")
+    assert len(record) == 1 and record[0].data["session_id"] == session["session_id"]
+    # a candidate is not a regression: the fixer never picks it up
+    assert issue["number"] not in out.candidates
+    assert not [s for s in devin.sessions.values() if f"issue-{issue['number']}" in s["tags"]]
+    rollup = gh.comments[out.status_issue][-1]["body"]
+    assert "1 candidate(s) filed" in rollup and issue["html_url"] in rollup
+
+
+def test_finder_exploration_runs_on_a_passing_verification_too(registry, world):
+    devin, gh = world
+    out = do_finder(devin, gh, registry, sleep=finish_exploring(devin, verify_outcome="ok"))
+    assert out.testing["verdict"] == "acceptance met" and len(explorations(devin)) == 1
+    assert len(candidate_issues(gh)) == 1
+
+
+def test_finder_exploration_reuses_the_open_candidate_for_the_same_fingerprint(registry, world):
+    devin, gh = world
+    first = do_finder(devin, gh, registry, sleep=finish_exploring(devin))
+    (issue,) = candidate_issues(gh)
+    pr = load_event()["pull_request"]
+    later = gh.merge(pr["number"] + 1, branch="master", sha="2" * 40, title="feat: another merge")
+    event = {**load_event(), "number": later["number"], "pull_request": later}
+    again = do_finder(devin, gh, registry, event=event, sleep=finish_exploring(devin))
+    assert len(explorations(devin)) == 2 and len(candidate_issues(gh)) == 1
+    assert again.exploration["filed"] == [] and again.exploration["duplicates"] == [
+        {"fingerprint": "sqllab-csv-export-ignores-row-limit", "issue": issue["number"]}
+    ]
+    seen = find(IssueLedger(gh, REPO).read(issue["number"]), "candidate_seen")
+    assert len(seen) == 1 and seen[0].data["head"] == "2" * 40
+    assert first.exploration["filed"][0]["issue"] == issue["number"]
+
+
+def test_finder_exploration_refiles_a_closed_candidate(registry, world):
+    devin, gh = world
+    do_finder(devin, gh, registry, sleep=finish_exploring(devin))
+    (issue,) = candidate_issues(gh)
+    gh.issues[issue["number"]]["state"] = "closed"
+    pr = load_event()["pull_request"]
+    later = gh.merge(pr["number"] + 1, branch="master", sha="3" * 40)
+    out = do_finder(
+        devin, gh, registry, event={**load_event(), "pull_request": later}, sleep=finish_exploring(devin)
+    )
+    assert len(out.exploration["filed"]) == 1 and out.exploration["filed"][0]["issue"] != issue["number"]
+
+
+def test_finder_replay_starts_no_second_exploration(registry, world):
+    devin, gh = world
+    do_finder(devin, gh, registry, sleep=finish_exploring(devin))
+    again = do_finder(devin, gh, registry, sleep=finish_exploring(devin))
+    assert len(explorations(devin)) == 1 and len(candidate_issues(gh)) == 1
+    assert again.exploration["filed"] == [] and len(again.exploration["duplicates"]) == 1
+    pr = load_event()["pull_request"]["number"]
+    assert len(find(IssueLedger(gh, REPO).read(pr), "exploration_started")) == 1
+
+
+def test_finder_exploration_with_no_candidates_files_nothing(registry, world):
+    devin, gh = world
+    out = do_finder(devin, gh, registry, sleep=finish_exploring(devin, explore_outcome="failed"))
+    assert len(explorations(devin)) == 1 and candidate_issues(gh) == []
+    assert out.exploration["filed"] == [] and out.exploration["booted"] is True
+    assert "0 candidate(s) filed" in gh.comments[out.status_issue][-1]["body"]
+
+
+def test_finder_exploration_error_is_reported_not_filed(registry, world):
+    devin, gh = world
+    out = do_finder(devin, gh, registry, sleep=finish_exploring(devin, explore_outcome="error"))
+    assert candidate_issues(gh) == [] and "postgres failed" in out.exploration["error"]
+    assert "exploration: session" in gh.comments[out.status_issue][-1]["body"]
+
+
+def test_finder_skips_exploration_when_disabled_or_when_verification_errored(registry, world):
+    devin, gh = world
+    out = do_finder(devin, gh, registry, explore=False, sleep=finish_exploring(devin))
+    assert explorations(devin) == [] and out.exploration["skipped_reason"] == "EXPLORE_AFTER_VERIFY=0"
+    devin2, gh2 = FakeDevin(), FakeGitHub.from_fixtures()
+    out2 = do_finder(devin2, gh2, registry, sleep=finish_exploring(devin2, verify_outcome="error"))
+    assert explorations(devin2) == [] and out2.exploration["skipped_reason"] == "verification ended in error"
+
+
+def test_exploration_schema_requires_a_reproduction_and_a_probe_per_candidate():
+    check_schema(EXPLORE_SCHEMA)
+    good = FakeDevin()
+    sid = good.create_session(
+        {"prompt": "x", "tags": ["sda-explore"], "structured_output_schema": EXPLORE_SCHEMA}
+    )
+    out = good.advance(sid["session_id"], outcome="ok", acus=1.0)["structured_output"]
+    assert validate(EXPLORE_SCHEMA, out) == []
+    partial = copy.deepcopy(out)
+    del partial["candidates"][0]["probe_script"]
+    assert validate(EXPLORE_SCHEMA, partial)
+    speculative = copy.deepcopy(out)
+    speculative["candidates"][0]["fingerprint"] = "Not A Slug"
+    assert validate(EXPLORE_SCHEMA, speculative)
+    errored = {"status": "error", "head_sha": out["head_sha"], "error_message": "x", "candidates": []}
+    assert validate(EXPLORE_SCHEMA, errored)
+
+
+def test_finder_payload_carries_the_explore_switch():
+    on = automations.finder_payload(REPO, AUTO, every_n=5)
+    off = automations.finder_payload(REPO, AUTO, every_n=5, explore=False)
+    assert (
+        "EXPLORE_AFTER_VERIFY=1" in on["actions"][0]["prompt"]
+        and "sda-candidate" in on["actions"][0]["prompt"]
+    )
+    assert (
+        "EXPLORE_AFTER_VERIFY=0" in off["actions"][0]["prompt"]
+        and "sda-candidate" not in off["actions"][0]["prompt"]
+    )
+    assert on["metadata"]["explore_after_verify"] == "1" and off["metadata"]["explore_after_verify"] == "0"
 
 
 # --- playbooks -----------------------------------------------------------------------------------
