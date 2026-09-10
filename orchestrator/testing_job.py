@@ -1,4 +1,6 @@
-"""REDUCE: on a merged PR, start exactly one verification session for (pr_url, merge_commit_sha).
+"""TESTING: on a merged PR, start exactly one verification session for (pr_url, merge_commit_sha),
+wait for its verdict, publish it on every PR of the window, and file the regression issue that
+starts AUTOPR when it failed.
 
 The ledger for a PR is its own comment thread (PRs are issues to the GitHub API), so the
 idempotency record survives orchestrator restarts and is visible to reviewers.
@@ -13,6 +15,8 @@ merges, with BASE = the first parent of the oldest merge in the window.
 from __future__ import annotations
 
 import logging
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -20,14 +24,15 @@ from .devin_api import DevinClient
 from .github_api import GitHubClient, closing_issue_numbers
 from .ledger import IssueLedger, LedgerEntry, find
 from .prompts import verification_prompt
+from .publish import TRIGGER_TAG_PREFIX, publish_verification, session_acus, verdict
 from .registry import Probe, Registry
 from .schema import VERIFICATION_SCHEMA
-from .sessions import holds_slot
+from .sessions import holds_slot, wait_until_finished
+from .status import post_run, testing_lines
 
 log = logging.getLogger(__name__)
 
 VERIFY_TAG = "sda-verify"
-TRIGGER_TAG_PREFIX = "trigger-pr-"
 
 
 class NotAMergedPR(ValueError):
@@ -35,7 +40,7 @@ class NotAMergedPR(ValueError):
 
 
 @dataclass
-class ReduceReport:
+class TestingReport:
     pr_url: str
     merge_commit_sha: str
     base_sha: str | None = None
@@ -45,6 +50,10 @@ class ReduceReport:
     skipped_reason: str | None = None
     merge_index: int | None = None
     window_prs: list[int] = field(default_factory=list)
+    verdict: str | None = None
+    posted_to: list[int] = field(default_factory=list)
+    regression_filed: dict[str, Any] | None = None
+    status_issue: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return self.__dict__.copy()
@@ -89,7 +98,7 @@ def regression_issue_numbers(
     return out
 
 
-def run_reduce(
+def run_testing(
     *,
     devin: DevinClient,
     gh: GitHubClient,
@@ -100,12 +109,14 @@ def run_reduce(
     verify_branch: str = "master",
     every_n: int = 5,
     playbook_id: str | None = None,
-) -> ReduceReport:
+    wait: bool = False,
+    sleep: Callable[[float], None] = time.sleep,
+) -> TestingReport:
     pr = extract_merged_pr(event)
     pr_url = str(pr["html_url"])
     head_sha = str(pr["merge_commit_sha"])
     number = int(pr["number"])
-    report = ReduceReport(pr_url=pr_url, merge_commit_sha=head_sha)
+    report = TestingReport(pr_url=pr_url, merge_commit_sha=head_sha)
 
     repo_full = str((event.get("repository") or {}).get("full_name") or target_repo)
     if repo_full.lower() != target_repo.lower():
@@ -147,7 +158,7 @@ def run_reduce(
             LedgerEntry("merge_counted", data={"key": key, "merge_index": k, "every_n": every_n}),
             [f"merge #{k} into `{verify_branch}`; verification runs every {every_n} merges"],
         )
-        log.info("REDUCE: %s counted (%d %% %d != 0), no session", key, k, every_n)
+        log.info("TESTING: %s counted (%d %% %d != 0), no session", key, k, every_n)
         return report
     report.window_prs = [int(p["number"]) for p in window]
 
@@ -168,7 +179,7 @@ def run_reduce(
     regression_probes: list[Probe] = registry.probes_for(regression)
 
     if not playbook_id:
-        log.warning("REDUCE: PLAYBOOK_ID_VERIFY unset, using the fully inline verification prompt")
+        log.warning("TESTING: PLAYBOOK_ID_VERIFY unset, using the fully inline verification prompt")
     prompt = verification_prompt(
         target_repo,
         automation_repo,
@@ -220,5 +231,47 @@ def run_reduce(
             f"regression guards: {', '.join(f'#{n}' for n in regression) or 'none'}",
         ],
     )
-    log.info("REDUCE: %s -> session %s", key, session_id)
+    log.info("TESTING: %s -> session %s", key, session_id)
+    if not wait:
+        return report
+
+    finished = wait_until_finished(devin, session_id, sleep)
+    report.verdict = verdict(finished.get("structured_output"))
+    acu_cache: dict[str, float] = {}
+    posted, filed = publish_verification(
+        devin=devin,
+        gh=gh,
+        ledger=ledger,
+        target_repo=target_repo,
+        automation_repo=automation_repo,
+        session=finished,
+        threads=list(report.window_prs),
+        acu_cache=acu_cache,
+    )
+    report.posted_to = posted
+    report.regression_filed = filed
+    log.info("TESTING: %s finished: %s", session_id, report.verdict)
+    report.status_issue = post_run(
+        gh,
+        target_repo,
+        "testing",
+        [session_id],
+        f"TESTING: merge #{report.merge_index} verified: {report.verdict}",
+        {
+            "head_sha": head_sha,
+            "base_sha": base_sha,
+            "window": list(report.window_prs),
+            "verdict": report.verdict,
+            "regression_issue": (filed or {}).get("issue"),
+        },
+        testing_lines(
+            base_sha=base_sha,
+            head_sha=head_sha,
+            window_prs=list(report.window_prs),
+            merge_index=report.merge_index,
+            session=finished,
+            acus=session_acus(devin, finished, acu_cache),
+            regression_filed=filed,
+        ),
+    )
     return report

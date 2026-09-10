@@ -1,4 +1,11 @@
-"""Build and register the three automations (MAP, REDUCE, REPORT) through the Automations API.
+"""Build and register the two automations (TESTING, AUTOPR) through the Automations API.
+
+The chain: a PR merges -> TESTING verifies every 5th merge, waits for the verdict, posts it on
+every PR of the window and files an `sda-regression` issue on failure -> that issue's
+`github:issues` event fires AUTOPR, which starts the fix session, waits for it and posts its
+outcome on the issue -> the fix PR merges and re-enters TESTING. Each stage publishes its own
+telemetry; there is no sweeper. Automations under retired names (MAP, REDUCE, REPORT) are deleted
+on register.
 
 Every payload is validated locally against the request schemas vendored from
 https://docs.devin.ai/v3-openapi.yaml (orchestrator/v3_schemas.json) before anything is sent.
@@ -8,7 +15,7 @@ Design constraints honoured here (see AutomationCreateRequest in the spec):
 * run_as = {"type": "organization"} on all of them
 * no limits.max_acu_limit, no concurrency caps, no timeouts
 * net_policy allows the git proxy, GitHub, the Devin API and PyPI; the shim needs nothing else
-* prompts are thin shims: clone this repo, run `python -m orchestrator <map|reduce|report>`
+* prompts are thin shims: clone this repo, run `python -m orchestrator <autopr|testing> --wait`
 """
 
 from __future__ import annotations
@@ -20,13 +27,17 @@ from typing import Any
 from jsonschema import Draft202012Validator
 
 from .devin_api import DevinClient
+from .regression import REGRESSION_LABEL
 
 SCHEMAS_PATH = Path(__file__).with_name("v3_schemas.json")
 FRIDAY_RRULE = "FREQ=WEEKLY;BYDAY=FR"
-HOURLY_RRULE = "FREQ=HOURLY"
-MAP_NAME = "superset-devin-automation: MAP (Friday ready-issue sweep)"
-REDUCE_NAME = "superset-devin-automation: REDUCE (verify merged PR)"
-REPORT_NAME = "superset-devin-automation: REPORT (publish session outcomes)"
+AUTOPR_NAME = "superset-devin-automation: AUTOPR (fix session per regression issue + Friday sweep)"
+TESTING_NAME = "superset-devin-automation: TESTING (verify every 5th merge, file regressions)"
+RETIRED_NAMES = (
+    "superset-devin-automation: MAP (Friday ready-issue sweep)",
+    "superset-devin-automation: REDUCE (verify merged PR)",
+    "superset-devin-automation: REPORT (publish session outcomes)",
+)
 NET_POLICY = {
     "allow": [
         {"hostname": h}
@@ -66,43 +77,68 @@ def _env_prefix(name: str, playbook_id: str | None) -> str:
     return f"{name}={playbook_id} " if playbook_id else ""
 
 
-def map_payload(target_repo: str, automation_repo: str, playbook_id_fix: str | None = None) -> dict[str, Any]:
+def autopr_payload(
+    target_repo: str, automation_repo: str, playbook_id_fix: str | None = None
+) -> dict[str, Any]:
     prompt = (
         _shim(
             automation_repo,
-            _env_prefix("PLAYBOOK_ID_FIX", playbook_id_fix) + "python -m orchestrator map",
+            _env_prefix("PLAYBOOK_ID_FIX", playbook_id_fix)
+            + "python -m orchestrator autopr --wait --event-json event.json  "
+            "(if the triggering event is a github:issues payload, first write it to event.json unmodified; "
+            "if the trigger is the schedule, run without --event-json)",
         )
         + f"\nTarget repository for issues: @{target_repo}\n"
+        + f"An issue event means TESTING filed a `{REGRESSION_LABEL}` issue: the command starts the one fix "
+        "session for that issue. The Friday schedule triages every open `ready` issue instead. Either "
+        "way the command waits for the fix sessions and posts each outcome on its issue; it can run for "
+        "hours, keep waiting.\n"
     )
     return {
-        "name": MAP_NAME,
+        "name": AUTOPR_NAME,
         "enabled": True,
         "run_as": {"type": "organization"},
         "metadata": {
-            "component": "map",
+            "component": "autopr",
             "target_repo": target_repo,
             "playbook_id_fix": playbook_id_fix or "",
         },
         "triggers": [
             {
+                "event_type": "github:issues",
+                # GitHub sends one `labeled` event per label on an issue created with labels, so
+                # this single condition covers both create-with-label and label-later.
+                "conditions": {
+                    "any": [
+                        {
+                            "all": [
+                                {"field": "action", "operator": "eq", "value": "labeled"},
+                                {"field": "label.name", "operator": "eq", "value": REGRESSION_LABEL},
+                                {"field": "repository.full_name", "operator": "eq", "value": target_repo},
+                            ]
+                        }
+                    ]
+                },
+            },
+            {
                 "event_type": "schedule:recurring",
                 "conditions": {
                     "any": [{"all": [{"field": "rrule", "operator": "recurrence", "value": FRIDAY_RRULE}]}]
                 },
-            }
+            },
         ],
         "actions": [
             {
                 "type": "start_session",
                 "prompt": prompt,
-                "session": {"tags": ["sda-map"]},
+                "session": {"tags": ["sda-autopr"]},
             }
         ],
         "session_settings": {"net_policy": NET_POLICY},
     }
 
 
-def reduce_payload(
+def testing_payload(
     target_repo: str,
     automation_repo: str,
     verify_branch: str = "master",
@@ -114,19 +150,21 @@ def reduce_payload(
             automation_repo,
             f"VERIFY_BRANCH={verify_branch} VERIFY_EVERY_N_MERGES={every_n} "
             + _env_prefix("PLAYBOOK_ID_VERIFY", playbook_id_verify)
-            + "python -m orchestrator reduce --event-json event.json  "
+            + "python -m orchestrator testing --wait --event-json event.json  "
             "(first write the appended pull_request event payload to event.json, unmodified)",
         )
         + f"\nTarget repository: @{target_repo}\n"
         + f"Cadence: the orchestrator only starts a verification session for every {every_n}th PR "
-        f"merged into `{verify_branch}`; on other merges it records the count and exits.\n"
+        f"merged into `{verify_branch}`; on other merges it records the count and exits. With --wait it "
+        "blocks until that verification finishes, however long that takes, then posts the verdict on every "
+        f"PR of the window and files a `{REGRESSION_LABEL}` issue if it failed. Do not interrupt it.\n"
     )
     return {
-        "name": REDUCE_NAME,
+        "name": TESTING_NAME,
         "enabled": True,
         "run_as": {"type": "organization"},
         "metadata": {
-            "component": "reduce",
+            "component": "testing",
             "target_repo": target_repo,
             "verify_branch": verify_branch,
             "verify_every_n_merges": str(every_n),
@@ -152,53 +190,7 @@ def reduce_payload(
             {
                 "type": "start_session",
                 "prompt": prompt,
-                "session": {"tags": ["sda-reduce"]},
-            }
-        ],
-        "session_settings": {"net_policy": NET_POLICY},
-    }
-
-
-def report_payload(
-    target_repo: str,
-    automation_repo: str,
-    digest_issue: int | None = None,
-    digest_every_hours: int = 24,
-) -> dict[str, Any]:
-    digest_env = f"REPORT_DIGEST_ISSUE={digest_issue} " if digest_issue is not None else ""
-    prompt = (
-        _shim(
-            automation_repo,
-            f"{digest_env}REPORT_DIGEST_EVERY_HOURS={digest_every_hours} python -m orchestrator report",
-        )
-        + f"\nTarget repository: @{target_repo}\n"
-        + "The command publishes the outcome of every finished fix/verification session to the "
-        "issue or PR it belongs to; sessions already reported are skipped. A verification that "
-        "failed also gets a regression issue and a fix session started for it.\n"
-    )
-    return {
-        "name": REPORT_NAME,
-        "enabled": True,
-        "run_as": {"type": "organization"},
-        "metadata": {
-            "component": "report",
-            "target_repo": target_repo,
-            "digest_issue": str(digest_issue) if digest_issue is not None else "",
-            "digest_every_hours": str(digest_every_hours),
-        },
-        "triggers": [
-            {
-                "event_type": "schedule:recurring",
-                "conditions": {
-                    "any": [{"all": [{"field": "rrule", "operator": "recurrence", "value": HOURLY_RRULE}]}]
-                },
-            }
-        ],
-        "actions": [
-            {
-                "type": "start_session",
-                "prompt": prompt,
-                "session": {"tags": ["sda-report"]},
+                "session": {"tags": ["sda-testing"]},
             }
         ],
         "session_settings": {"net_policy": NET_POLICY},
@@ -247,17 +239,18 @@ def register(
     every_n: int = 5,
     playbook_id_fix: str | None = None,
     playbook_id_verify: str | None = None,
-    digest_issue: int | None = None,
-    digest_every_hours: int = 24,
     dry_run: bool = False,
 ) -> list[dict[str, Any]]:
-    """Create the automations, or update them in place if ones with the same name exist."""
+    """Create the automations, or update them in place if ones with the same name exist.
+
+    The ones registered under retired names are deleted last, once every replacement is in place,
+    so a failure part-way leaves the old chain running rather than nothing.
+    """
     results: list[dict[str, Any]] = []
     existing = {a.get("name"): a for a in devin.list_automations()} if not dry_run else {}
     payloads = (
-        map_payload(target_repo, automation_repo, playbook_id_fix),
-        reduce_payload(target_repo, automation_repo, verify_branch, every_n, playbook_id_verify),
-        report_payload(target_repo, automation_repo, digest_issue, digest_every_hours),
+        testing_payload(target_repo, automation_repo, verify_branch, every_n, playbook_id_verify),
+        autopr_payload(target_repo, automation_repo, playbook_id_fix),
     )
     for payload in payloads:
         errors = validate_payload(payload)
@@ -273,4 +266,9 @@ def register(
             results.append(devin.update_automation(str(current["automation_id"]), update))
         else:
             results.append(devin.create_automation(payload))
+    for name in RETIRED_NAMES:
+        old = existing.get(name)
+        if old and old.get("automation_id"):
+            devin.delete_automation(str(old["automation_id"]))
+            results.append({"name": name, "deleted": True})
     return results

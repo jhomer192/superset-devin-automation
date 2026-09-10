@@ -7,8 +7,16 @@ new, claimed, running, exit, error, suspended, resuming.
 
 from __future__ import annotations
 
+import logging
+import time
+from collections.abc import Callable
 from enum import StrEnum
 from typing import Any
+
+from .devin_api import DevinClient
+
+log = logging.getLogger(__name__)
+POLL_SECONDS = 60
 
 LIVE_STATUSES = frozenset({"new", "claimed", "running", "resuming"})
 DEAD_STATUSES = frozenset({"exit", "error"})
@@ -66,13 +74,15 @@ def holds_slot(status: str | None, status_detail: str | None) -> bool:
     return not is_finished(status, status_detail)
 
 
-def session_liveness(session: dict[str, Any]) -> Liveness:
-    return classify(session.get("status"), session.get("status_detail"))
-
-
-def merged_pr_urls(session: dict[str, Any]) -> list[str]:
-    return [
-        pr["pr_url"]
-        for pr in session.get("pull_requests") or []
-        if str(pr.get("pr_state") or "").lower() == "merged"
-    ]
+def wait_until_finished(
+    devin: DevinClient, session_id: str, sleep: Callable[[float], None] = time.sleep
+) -> dict[str, Any]:
+    """Poll until the session is finished. No deadline: a verification takes as long as building
+    and booting Superset twice takes, and a session that is waiting on a human holds the slot
+    until that human acts."""
+    while True:
+        session = devin.get_session(session_id)
+        if is_finished(session.get("status"), session.get("status_detail")):
+            return session
+        log.info("%s is %s/%s, waiting", session_id, session.get("status"), session.get("status_detail"))
+        sleep(POLL_SECONDS)

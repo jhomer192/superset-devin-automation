@@ -237,7 +237,7 @@
           "script": "probes/issue_12/probe_lockfile.sh"
         }
       ],
-      "triage_note": "Both parts are mechanical (npm update nx --package-lock-only plus a one-line override edit). Dependabot is disabled on this fork, so MAP records the issue as deferred instead of starting a session; the probe still verifies a human-landed refresh.",
+      "triage_note": "Both parts are mechanical (npm update nx --package-lock-only plus a one-line override edit). Dependabot is disabled on this fork, so AUTOPR records the issue as deferred instead of starting a session; the probe still verifies a human-landed refresh.",
       "closing_pr": null
     },
     {
@@ -259,7 +259,7 @@
       ],
       "closing_pr": "https://github.com/jhomer192/superset/pull/17",
       "closing_pr_state": "open",
-      "triage_note": "Same defect as #12; PR 17 says `Closes #15`, so REDUCE keys the lockfile probe off #15 while MAP deflects both as dependency refreshes."
+      "triage_note": "Same defect as #12; PR 17 says `Closes #15`, so TESTING keys the lockfile probe off #15 while AUTOPR deflects both as dependency refreshes."
     }
   ]
 }

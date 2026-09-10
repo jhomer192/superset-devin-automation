@@ -30,7 +30,7 @@ def _outcome(issue: IssueSpec) -> str:
         return outcome
     if issue.not_planned_reason:
         return _cell(issue.not_planned_reason)
-    return "open; a MAP run starts a fix session"
+    return "open; an AUTOPR sweep starts a fix session"
 
 
 def render(registry: Registry) -> str:

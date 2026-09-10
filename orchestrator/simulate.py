@@ -56,15 +56,6 @@ class FakeDevin:
     def get_session(self, session_id: str) -> JSON:
         return dict(self.sessions[session_id])
 
-    def list_sessions(self, **params: Any) -> list[JSON]:
-        origins = params.get("origins")
-        tags = {str(t) for t in params.get("tags") or []}
-        return [
-            dict(s)
-            for s in self.sessions.values()
-            if (not origins or s["origin"] == origins) and (not tags or tags & set(s["tags"]))
-        ]
-
     def list_automations(self) -> list[JSON]:
         return [dict(a) for a in self.automations.values()]
 
@@ -77,6 +68,9 @@ class FakeDevin:
         self.automations[automation_id].update(body)
         return dict(self.automations[automation_id])
 
+    def delete_automation(self, automation_id: str) -> None:
+        del self.automations[automation_id]
+
     def list_playbooks(self) -> list[JSON]:
         return [dict(p) for p in self.playbooks.values()]
 
@@ -88,29 +82,6 @@ class FakeDevin:
     def update_playbook(self, playbook_id: str, body: JSON) -> JSON:
         self.playbooks[playbook_id].update(body)
         return dict(self.playbooks[playbook_id])
-
-    def session_metrics(self, time_after: int, time_before: int) -> JSON:
-        sessions = list(self.sessions.values())
-        merged = [s for s in sessions if any(p.get("pr_state") == "merged" for p in s["pull_requests"])]
-        acus = [float(s["acus_consumed"]) for s in sessions]
-        return {
-            "sessions_created_count": len(sessions),
-            "sessions_with_merged_prs_count": len(merged),
-            "avg_acus_per_session": round(sum(acus) / len(acus), 3) if acus else 0.0,
-        }
-
-    def pr_metrics(self, time_after: int, time_before: int) -> JSON:
-        prs = [pr for s in self.sessions.values() for pr in s["pull_requests"]]
-        states = [p.get("pr_state") for p in prs]
-        return {
-            "prs_created_count": len(prs),
-            "prs_opened_count": states.count("open"),
-            "prs_merged_count": states.count("merged"),
-            "prs_closed_count": states.count("closed"),
-        }
-
-    def org_consumption(self, time_after: int, time_before: int) -> JSON:
-        return {"total_acus": round(sum(self.consumption.values()), 3), "consumption_by_date": []}
 
     def session_consumption(self, session_id: str) -> JSON:
         return {"session_id": session_id, "total_acus": self.consumption.get(session_id, 0.0)}
@@ -232,6 +203,17 @@ class FakeGitHub:
         self.pulls[number] = pr
         return dict(pr)
 
+    def open_pull(self, number: int, *, title: str, body: str) -> JSON:
+        self.pulls[number] = {
+            "number": number,
+            "html_url": f"https://github.com/jhomer192/superset/pull/{number}",
+            "title": title,
+            "body": body,
+            "state": "open",
+            "merged": False,
+        }
+        return dict(self.pulls[number])
+
     def list_issues(self, repo: str, labels: str, state: str = "open") -> list[JSON]:
         wanted = {lbl.strip() for lbl in labels.split(",") if lbl.strip()}
         return [
@@ -255,6 +237,10 @@ class FakeGitHub:
             "html_url": f"https://github.com/{repo}/issues/{number}",
         }
         return dict(self.issues[number])
+
+    def add_labels(self, repo: str, number: int, labels: list[str]) -> None:
+        have = {lb["name"] for lb in self.issues[number]["labels"]}
+        self.issues[number]["labels"] += [{"name": name} for name in labels if name not in have]
 
     def list_issue_comments(self, repo: str, number: int) -> list[JSON]:
         return [dict(c) for c in self.comments.get(number, [])]
@@ -302,3 +288,13 @@ def pr_number(url: str) -> int:
     if not m:
         raise ValueError(f"not a PR url: {url}")
     return int(m.group(1))
+
+
+def issue_event(issue: JSON, repo: str, action: str = "labeled", label: str = "sda-regression") -> JSON:
+    """The github:issues payload GitHub sends when `label` is put on `issue`."""
+    return {
+        "action": action,
+        "issue": dict(issue),
+        "label": {"name": label},
+        "repository": {"full_name": repo},
+    }
