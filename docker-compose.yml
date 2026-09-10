@@ -1,6 +1,6 @@
 # `docker compose up` runs the whole loop offline against fixtures (no API keys needed).
 # `docker compose run --rm orchestrator map` / `reduce --event-json /events/pr.json` /
-# `metrics` / `register` use the credentials from .env (copy .env.example).
+# `report` / `metrics` / `register` use the credentials from .env (copy .env.example).
 services:
   orchestrator:
     build: .
@@ -13,6 +13,8 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       VERIFY_BRANCH: ${VERIFY_BRANCH:-master}
       VERIFY_EVERY_N_MERGES: ${VERIFY_EVERY_N_MERGES:-1}
+      REPORT_DIGEST_ISSUE: ${REPORT_DIGEST_ISSUE:-}
+      REPORT_DIGEST_EVERY_HOURS: ${REPORT_DIGEST_EVERY_HOURS:-24}
     volumes:
       - ./events:/events:ro
     command: ["simulate"]

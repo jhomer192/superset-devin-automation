@@ -1,6 +1,6 @@
 import copy
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -13,6 +13,7 @@ from orchestrator.ledger import IssueLedger, LedgerEntry, find, parse_entries
 from orchestrator.map_job import run_map
 from orchestrator.reduce_job import NotAMergedPR, extract_merged_pr, run_reduce
 from orchestrator.registry import load_registry
+from orchestrator.report_job import run_report
 from orchestrator.sessions import Liveness, classify, holds_slot, is_finished
 from orchestrator.simulate import FakeDevin, FakeGitHub, load_event
 from orchestrator.triage import Decision, Reason
@@ -298,6 +299,19 @@ def test_verify_settings_from_environment(monkeypatch):
         load_settings(simulate=True)
 
 
+def test_report_settings_from_environment(monkeypatch):
+    monkeypatch.delenv("REPORT_DIGEST_ISSUE", raising=False)
+    s = load_settings(simulate=True)
+    assert s.report_digest_issue is None and s.report_digest_every_hours == 24
+    monkeypatch.setenv("REPORT_DIGEST_ISSUE", "42")
+    monkeypatch.setenv("REPORT_DIGEST_EVERY_HOURS", "6")
+    s = load_settings(simulate=True)
+    assert s.report_digest_issue == 42 and s.report_digest_every_hours == 6
+    monkeypatch.setenv("REPORT_DIGEST_EVERY_HOURS", "0")
+    with pytest.raises(SystemExit):
+        load_settings(simulate=True)
+
+
 def test_reduce_automation_prompt_carries_cadence():
     payload = automations.reduce_payload(REPO, AUTO, "main", 5)
     prompt = payload["actions"][0]["prompt"]
@@ -421,7 +435,11 @@ def test_metrics_with_no_sessions_has_no_division_by_zero():
 
 
 def test_automation_payloads_validate_against_openapi_and_carry_no_ceilings():
-    for payload in (automations.map_payload(REPO, AUTO), automations.reduce_payload(REPO, AUTO)):
+    for payload in (
+        automations.map_payload(REPO, AUTO),
+        automations.reduce_payload(REPO, AUTO),
+        automations.report_payload(REPO, AUTO, 42),
+    ):
         assert automations.validate_payload(payload) == []
         automations.assert_no_ceilings(payload)
         assert payload["run_as"] == {"type": "organization"}
@@ -461,7 +479,19 @@ def test_register_is_idempotent_by_name():
     devin = FakeDevin()
     automations.register(devin, REPO, AUTO)
     automations.register(devin, REPO, AUTO)
-    assert len(devin.automations) == 2
+    assert len(devin.automations) == 3
+
+
+def test_report_automation_is_hourly_and_carries_the_digest_issue():
+    payload = automations.report_payload(REPO, AUTO, 42, digest_every_hours=6)
+    trigger = payload["triggers"][0]
+    assert trigger["event_type"] == "schedule:recurring"
+    assert trigger["conditions"]["any"][0]["all"] == [
+        {"field": "rrule", "operator": "recurrence", "value": "FREQ=HOURLY"}
+    ]
+    prompt = payload["actions"][0]["prompt"]
+    assert "REPORT_DIGEST_ISSUE=42" in prompt and "REPORT_DIGEST_EVERY_HOURS=6" in prompt
+    assert "REPORT_DIGEST_ISSUE" not in automations.report_payload(REPO, AUTO)["actions"][0]["prompt"]
 
 
 # --- whole loop --------------------------------------------------------------------------------
@@ -493,6 +523,70 @@ def test_count_deflections(registry, world):
     devin, gh = world
     do_map(devin, gh, registry)
     assert count_deflections(gh, registry, REPO) == 2
+
+
+# --- report ------------------------------------------------------------------------------------
+
+
+def do_report(devin, gh, *, digest_issue=None, now=None, digest_every_hours=24):
+    return run_report(
+        devin=devin,
+        gh=gh,
+        target_repo=REPO,
+        deflections=lambda: 0,
+        digest_issue=digest_issue,
+        digest_every_hours=digest_every_hours,
+        now=now,
+    )
+
+
+def test_report_publishes_each_finished_session_once(registry, world):
+    devin, gh = world
+    started = do_map(devin, gh, registry).started
+    by_issue = {s["issue"]: s["session_id"] for s in started}
+    devin.advance(by_issue[5], outcome="ok", acus=3.0, pr_url="https://github.com/jhomer192/superset/pull/14")
+    devin.advance(by_issue[10], outcome="error", acus=0.5)
+    devin.suspend(by_issue[11], "waiting_for_user")
+
+    report = do_report(devin, gh)
+    assert {(p["thread"], p["kind"]) for p in report.posted} == {(5, "fix"), (10, "fix")}
+    assert report.unfinished == 5 and report.already_reported == 0
+
+    bodies = {n: "\n".join(c["body"] for c in cs) for n, cs in gh.comments.items()}
+    assert "acceptance met" in bodies[5] and "ACUs: 3" in bodies[5]
+    assert "error: simulated failure before any probe ran" in bodies[10]
+    assert 11 not in {p["thread"] for p in report.posted}
+
+    assert do_report(devin, gh).posted == []
+
+
+def test_report_posts_verification_verdict_on_the_pr(registry, world):
+    devin, gh = world
+    session_id = do_reduce(devin, gh, registry).session_id
+    devin.advance(session_id, outcome="ok", acus=6.0)
+    posted = do_report(devin, gh).posted
+    assert posted == [{"thread": 14, "kind": "verify", "session_id": session_id}]
+    body = gh.comments[14][-1]["body"]
+    assert "Verification session finished: acceptance met" in body
+    assert "base exit 1, head exit 0" in body
+
+
+def test_report_flags_a_session_that_finished_without_structured_output(world):
+    devin, gh = world
+    session = devin.create_session({"prompt": "p", "tags": ["sda-fix", "issue-5"]})
+    devin.sessions[session["session_id"]]["status"] = "exit"
+    assert do_report(devin, gh).posted
+    assert "no structured output" in gh.comments[5][-1]["body"]
+
+
+def test_digest_is_appended_at_most_once_per_interval(world):
+    devin, gh = world
+    now = datetime(2026, 1, 31, 12, tzinfo=UTC)
+    assert do_report(devin, gh, digest_issue=1, now=now).digest_posted
+    assert not do_report(devin, gh, digest_issue=1, now=now + timedelta(hours=23)).digest_posted
+    assert do_report(devin, gh, digest_issue=1, now=now + timedelta(hours=25)).digest_posted
+    digests = [c for c in gh.comments[1] if "metrics digest" in c["body"]]
+    assert len(digests) == 2 and "verification:" in digests[0]["body"]
 
 
 # --- verify/collect ---------------------------------------------------------------------------

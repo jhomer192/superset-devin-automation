@@ -21,6 +21,8 @@ class Settings:
     ready_label: str
     verify_branch: str
     verify_every_n_merges: int
+    report_digest_issue: int | None
+    report_digest_every_hours: int
     simulate: bool
     log_level: str
 
@@ -62,6 +64,10 @@ def load_settings(simulate: bool = False) -> Settings:
     every = int(env.get("VERIFY_EVERY_N_MERGES", "1") or 1)
     if every < 1:
         raise SystemExit("VERIFY_EVERY_N_MERGES must be >= 1")
+    digest_issue = env.get("REPORT_DIGEST_ISSUE", "").strip()
+    digest_hours = int(env.get("REPORT_DIGEST_EVERY_HOURS", "24") or 24)
+    if digest_hours < 1:
+        raise SystemExit("REPORT_DIGEST_EVERY_HOURS must be >= 1")
     return Settings(
         devin_api_base=env.get("DEVIN_API_BASE", "https://api.devin.ai").rstrip("/"),
         # the second names are the Devin secret names this loop is provisioned with
@@ -73,6 +79,8 @@ def load_settings(simulate: bool = False) -> Settings:
         ready_label=env.get("READY_LABEL", "ready"),
         verify_branch=env.get("VERIFY_BRANCH", "master"),
         verify_every_n_merges=every,
+        report_digest_issue=int(digest_issue) if digest_issue else None,
+        report_digest_every_hours=digest_hours,
         simulate=simulate or env.get("SIMULATE", "").lower() in {"1", "true", "yes"},
         log_level=env.get("LOG_LEVEL", "INFO"),
     )

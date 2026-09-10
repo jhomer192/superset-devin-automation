@@ -1,14 +1,14 @@
-"""Build and register the two automations (MAP and REDUCE) through the Automations API.
+"""Build and register the three automations (MAP, REDUCE, REPORT) through the Automations API.
 
-Both payloads are validated locally against the request schemas vendored from
+Every payload is validated locally against the request schemas vendored from
 https://docs.devin.ai/v3-openapi.yaml (orchestrator/v3_schemas.json) before anything is sent.
 
 Design constraints honoured here (see AutomationCreateRequest in the spec):
 * at most one start_session action, no monitor_session (deprecated for new automations)
-* run_as = {"type": "organization"} on both
+* run_as = {"type": "organization"} on all of them
 * no limits.max_acu_limit, no concurrency caps, no timeouts
 * net_policy allows git-manager.devin.ai so spawned sessions can clone
-* prompts are thin shims: clone this repo, run `python -m orchestrator <map|reduce>`
+* prompts are thin shims: clone this repo, run `python -m orchestrator <map|reduce|report>`
 """
 
 from __future__ import annotations
@@ -23,8 +23,10 @@ from .devin_api import DevinClient
 
 SCHEMAS_PATH = Path(__file__).with_name("v3_schemas.json")
 FRIDAY_RRULE = "FREQ=WEEKLY;BYDAY=FR"
+HOURLY_RRULE = "FREQ=HOURLY"
 MAP_NAME = "superset-devin-automation: MAP (Friday ready-issue sweep)"
 REDUCE_NAME = "superset-devin-automation: REDUCE (verify merged PR)"
+REPORT_NAME = "superset-devin-automation: REPORT (publish session outcomes)"
 GIT_MANAGER_NET_POLICY = {"allow": [{"hostname": "git-manager.devin.ai"}]}
 
 
@@ -128,6 +130,52 @@ def reduce_payload(
     }
 
 
+def report_payload(
+    target_repo: str,
+    automation_repo: str,
+    digest_issue: int | None = None,
+    digest_every_hours: int = 24,
+) -> dict[str, Any]:
+    digest_env = f"REPORT_DIGEST_ISSUE={digest_issue} " if digest_issue is not None else ""
+    prompt = (
+        _shim(
+            automation_repo,
+            f"{digest_env}REPORT_DIGEST_EVERY_HOURS={digest_every_hours} python -m orchestrator report",
+            "   DEVIN_API_KEY, DEVIN_ORG_ID, GITHUB_TOKEN (already in the environment as session secrets)",
+        )
+        + f"\nTarget repository: @{target_repo}\n"
+        + "The command publishes the outcome of every finished fix/verification session to the "
+        "issue or PR it belongs to; sessions already reported are skipped.\n"
+    )
+    return {
+        "name": REPORT_NAME,
+        "enabled": True,
+        "run_as": {"type": "organization"},
+        "metadata": {
+            "component": "report",
+            "target_repo": target_repo,
+            "digest_issue": str(digest_issue) if digest_issue is not None else "",
+            "digest_every_hours": str(digest_every_hours),
+        },
+        "triggers": [
+            {
+                "event_type": "schedule:recurring",
+                "conditions": {
+                    "any": [{"all": [{"field": "rrule", "operator": "recurrence", "value": HOURLY_RRULE}]}]
+                },
+            }
+        ],
+        "actions": [
+            {
+                "type": "start_session",
+                "prompt": prompt,
+                "session": {"tags": ["sda-report"]},
+            }
+        ],
+        "session_settings": {"net_policy": GIT_MANAGER_NET_POLICY},
+    }
+
+
 def _validator(schema_name: str) -> Draft202012Validator:
     """OpenAPI components use ``#/components/schemas/X`` refs, so validate through a root
     document that carries the vendored components and points at the requested schema."""
@@ -167,14 +215,17 @@ def register(
     *,
     verify_branch: str = "master",
     every_n: int = 1,
+    digest_issue: int | None = None,
+    digest_every_hours: int = 24,
     dry_run: bool = False,
 ) -> list[dict[str, Any]]:
-    """Create MAP and REDUCE, or update them in place if automations with the same name exist."""
+    """Create the automations, or update them in place if ones with the same name exist."""
     results: list[dict[str, Any]] = []
     existing = {a.get("name"): a for a in devin.list_automations()} if not dry_run else {}
     payloads = (
         map_payload(target_repo, automation_repo),
         reduce_payload(target_repo, automation_repo, verify_branch, every_n),
+        report_payload(target_repo, automation_repo, digest_issue, digest_every_hours),
     )
     for payload in payloads:
         errors = validate_payload(payload)
