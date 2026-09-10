@@ -93,6 +93,7 @@ def extract_regression_issue(event: dict[str, Any]) -> dict[str, Any]:
     """Validate the github:issues payload the way the automation trigger does."""
     issue = event.get("issue") or {}
     labels = {str(lb.get("name")) for lb in issue.get("labels") or []}
+    labels.add(str((event.get("label") or {}).get("name")))
     if event.get("action") not in {"opened", "labeled"} or REGRESSION_LABEL not in labels:
         raise NotARegressionIssue(f"event is not an issue labelled {REGRESSION_LABEL!r}")
     if not issue.get("number"):
