@@ -30,7 +30,6 @@ _PROBE_RESULT = {
         "probe",
         "kind",
         "head_exit_code",
-        "base_exit_code",
         "acceptance_met",
         "evidence",
     ],
@@ -43,7 +42,6 @@ _PROBE_RESULT = {
             "enum": ["offline_pytest", "offline_static", "log_assertion", "integration", "live_http"],
         },
         "head_exit_code": _EXIT,
-        "base_exit_code": {"anyOf": [_EXIT, {"type": "null"}]},
         "acceptance_met": {"type": "boolean"},
         "evidence": {"type": "string", "minLength": 1, "maxLength": 20000},
     },
@@ -58,7 +56,6 @@ VERIFICATION_SCHEMA: dict[str, Any] = {
     "properties": {
         "status": {"type": "string", "enum": ["ok", "error"]},
         "head_sha": _SHA,
-        "base_sha": {"anyOf": [_SHA, {"type": "null"}]},
         "error_message": {"type": "string", "minLength": 1, "maxLength": 20000},
         "acceptance_met": {"type": "boolean"},
         "probe_command": {"type": "string", "minLength": 1},

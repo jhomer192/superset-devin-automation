@@ -63,7 +63,6 @@ def post_run(
 
 def testing_lines(
     *,
-    base_sha: str | None,
     head_sha: str,
     window_prs: list[int],
     merge_index: int | None,
@@ -73,7 +72,7 @@ def testing_lines(
 ) -> list[str]:
     lines = [
         f"merge #{merge_index}, window {', '.join(f'#{p}' for p in window_prs)}",
-        f"head `{head_sha}` vs base `{base_sha}`",
+        f"head `{head_sha}`",
         *outcome_lines(session, acus),
     ]
     if regression_filed and regression_filed.get("escalated"):

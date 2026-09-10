@@ -201,11 +201,7 @@ def test_deflection_comment_is_written_once(registry, world):
 def test_reduce_dedups_on_pr_url_and_merge_sha(registry, world):
     devin, gh = world
     first = do_reduce(devin, gh, registry)
-    assert (
-        first.session_id
-        and first.closes == [5]
-        and first.base_sha == "fc110d8428f35249a2092778ca0a3e26a2de0b14"
-    )
+    assert first.session_id and first.requirements == registry.requirement_ids()
     replay = do_reduce(devin, gh, registry)
     assert replay.skipped_reason and replay.session_id == first.session_id
     assert len([s for s in devin.sessions.values() if "sda-verify" in s["tags"]]) == 1
@@ -250,8 +246,7 @@ def test_reduce_verifies_every_nth_merge_into_selected_branch(registry, world):
     assert all(r.session_id is None and "of 5" in r.skipped_reason for r in reports[:4])
     fifth = reports[4]
     assert fifth.session_id and fifth.window_prs == [101, 102, 103, 104, 105]
-    assert fifth.base_sha == "a" * 40 and fifth.merge_commit_sha == "5" * 40
-    assert fifth.closes == [3, 11]
+    assert fifth.merge_commit_sha == "5" * 40
     assert len([s for s in devin.sessions.values() if "sda-verify" in s["tags"]]) == 1
     # every non-triggering merge left a durable count on its own PR thread
     for n in (101, 102, 103, 104):
@@ -260,7 +255,7 @@ def test_reduce_verifies_every_nth_merge_into_selected_branch(registry, world):
     for i in range(6, 11):
         ev = merge_event(gh, 100 + i, branch="main", sha=chr(ord("a") + i) * 40)
         r = run_testing_n(devin, gh, registry, ev, branch="main", n=5)
-    assert r.merge_index == 10 and r.session_id and r.base_sha == "5" * 40
+    assert r.merge_index == 10 and r.session_id
     assert r.window_prs == [106, 107, 108, 109, 110]
 
 
@@ -283,48 +278,36 @@ def test_cadence_holds_across_windows_at_every_n_5(registry, world):
         if i % 5:
             assert reports[i].session_id is None and "of 5" in reports[i].skipped_reason
     assert len(verify_sessions(devin)) == 3
-    # each window is the five merges ending at the trigger, BASE is the head before the window
-    assert reports[5].window_prs == [301, 302, 303, 304, 305] and reports[5].base_sha == "a" * 40
-    assert reports[10].window_prs == [306, 307, 308, 309, 310] and reports[10].base_sha == shas[5]
-    assert reports[15].window_prs == [311, 312, 313, 314, 315] and reports[15].base_sha == shas[10]
+    # each window is the five merges ending at the trigger
+    assert reports[5].window_prs == [301, 302, 303, 304, 305]
+    assert reports[10].window_prs == [306, 307, 308, 309, 310]
+    assert reports[15].window_prs == [311, 312, 313, 314, 315]
     assert reports[15].merge_commit_sha == shas[15]
 
 
-def test_cadence_verification_runs_when_the_window_closes_no_issue(registry, world):
-    """The cadence is unconditional: a window with no `Closes #n` still gets the full suite."""
+def test_verification_selects_prd_probes_only_never_closed_issues(registry, world):
+    """Closed issues and `Closes #n` claims do not pick probes; PRD.md does."""
     devin, gh = world
     gh.branch_heads["main"] = "a" * 40
-    gh.close_completed(7)  # a fix already landed; its probes are the regression suite
+    gh.close_completed(6)  # issue_6 has a probe but no PRD requirement
+    gh.close_completed(10)
     for i in range(1, 6):
-        ev = merge_event(gh, 400 + i, branch="main", sha=f"{i:040x}", body="chore: nothing closed")
+        ev = merge_event(gh, 400 + i, branch="main", sha=f"{i:040x}", body="Closes #10")
         r = run_testing_n(devin, gh, registry, ev, branch="main", n=5)
-    assert r.merge_index == 5 and r.closes == [] and r.session_id
-    assert r.regression_issues == [7]
+    assert r.merge_index == 5 and r.session_id
+    assert r.requirements == registry.requirement_ids()
     prompt = devin.sessions[r.session_id]["prompt"]
-    assert "issue_7/unit" in prompt and '--regression "7"' in prompt
+    for _, probe in registry.requirement_probes(registry.requirement_ids()):
+        assert probe.id in prompt
+    assert "issue_10/" not in prompt and "issue_6/" not in prompt
+    assert "--regression" not in prompt and "--issues" not in prompt and "--base" not in prompt
+    assert "regression guards" not in prompt and "BASE" not in prompt
+    assert f'--head {5:040x} --requirements "{",".join(registry.requirement_ids())}"' in prompt
+    started = find(IssueLedger(gh, REPO).read(405), "verification_started")[0]
+    assert started.data["requirements"] == registry.requirement_ids() and "base" not in started.data
+    comment = [c["body"] for c in gh.comments[405] if "PRD requirements checked at HEAD" in c["body"]][-1]
+    assert "regression guards" not in comment and "closes:" not in comment
     assert len(verify_sessions(devin)) == 1
-
-
-def test_cadence_window_covers_every_merge_between_base_and_head(registry, world):
-    devin, gh = world
-    gh.branch_heads["main"] = "a" * 40
-    gh.close_completed(7)
-    shas = {i: f"{i:040x}" for i in range(1, 11)}
-    for i in range(1, 11):
-        ev = merge_event(gh, 500 + i, branch="main", sha=shas[i])
-        r = run_testing_n(devin, gh, registry, ev, branch="main", n=5)
-        if i == 5:
-            first = r
-    second = r
-    # BASE..HEAD of each verification is exactly the first-parent chain of its window
-    for report, lo in ((first, 1), (second, 6)):
-        chain, sha = [], report.merge_commit_sha
-        while sha != report.base_sha:
-            chain.append(sha)
-            sha = gh.get_commit_parents(REPO, sha)[0]
-        assert chain[::-1] == [shas[i] for i in range(lo, lo + 5)]
-        assert report.window_prs == [500 + i for i in range(lo, lo + 5)]
-    assert second.base_sha == first.merge_commit_sha
 
 
 def test_reduce_replay_does_not_recount_and_other_branches_do_not_count(registry, world):
@@ -515,8 +498,7 @@ def test_simulate_every_fifth_merge(registry, monkeypatch):
     assert [c["merge_index"] for c in counted] == [1, 2, 3, 4]
     assert all("of 5" in c["reason"] for c in counted)
     assert out["merge_testing"]["merge_index"] == 5 and out["merge_testing"]["session_id"]
-    assert out["merge_testing"]["base_sha"] == "fc110d8428f35249a2092778ca0a3e26a2de0b14"
-    assert out["merge_testing"]["closes"] == [5]
+    assert out["merge_testing"]["requirements"] == registry.requirement_ids()
 
 
 # --- autopr waits for its sessions ---------------------------------------------------------------
@@ -795,7 +777,7 @@ def test_one_failed_verification_at_every_n_5_files_one_issue_and_one_fix(regist
     assert "PR #205" in issue["title"]
     for n in range(201, 206):
         assert f"pull/{n}" in issue["body"]
-    assert reduce_report.base_sha in issue["body"] and reduce_report.merge_commit_sha in issue["body"]
+    assert reduce_report.merge_commit_sha in issue["body"]
 
     ledger = IssueLedger(gh, REPO)
     assert find(ledger.read(205), "regression_filed", session_id=reduce_report.session_id)
@@ -948,23 +930,28 @@ def test_an_errored_verification_is_reported_but_not_filed_as_a_regression(regis
 # --- verify/collect ---------------------------------------------------------------------------
 
 
-def test_collect_requires_base_failure_for_closed_issues_only(tmp_path):
+def test_collect_accepts_a_requirement_probe_iff_it_exits_zero_at_head(registry, tmp_path):
     from verify.collect import build_results
 
     log = tmp_path / "l.log"
     log.write_text("x")
-    row = {"probe": "p", "kind": "offline_pytest", "log": str(log)}
     rows = [
-        {**row, "issue": 5, "role": "head", "exit_code": 0},
-        {**row, "issue": 5, "role": "base", "exit_code": 0},
+        {
+            "probe": "issue_5/unit",
+            "issue": 5,
+            "kind": "offline_pytest",
+            "log": str(log),
+            "role": "head",
+            "exit_code": 0,
+        }
     ]
-    assert build_results(rows, closed={5}, regression=set())[0]["acceptance_met"] is False
-    assert build_results(rows, closed=set(), regression={5})[0]["acceptance_met"] is True
-    rows[1]["exit_code"] = 1
-    assert build_results(rows, closed={5}, regression=set())[0]["acceptance_met"] is True
+    out = build_results(rows, {"PRD-SQL-1"}, registry)[0]
+    assert out["acceptance_met"] is True and out["requirements"] == ["PRD-SQL-1"]
+    assert "base_exit_code" not in out and "BASE" not in out["evidence"]
     rows[0]["exit_code"] = 2
-    assert build_results(rows, closed={5}, regression=set())[0]["acceptance_met"] is False
-    assert build_results(rows[:1], closed={5}, regression=set())[0]["base_exit_code"] is None
+    assert build_results(rows, {"PRD-SQL-1"}, registry)[0]["acceptance_met"] is False
+    rows[0]["exit_code"] = 0
+    assert build_results(rows, {"PRD-OPS-1"}, registry)[0]["acceptance_met"] is False
 
 
 def test_testing_run_is_logged_once_on_the_status_issue(registry, world):
@@ -978,7 +965,7 @@ def test_testing_run_is_logged_once_on_the_status_issue(registry, world):
     assert runs[0].data["window"] == [201, 202, 203, 204, 205]
     assert runs[0].data["regression_issue"] == report.regression_filed["issue"]
     body = gh.comments[status][-1]["body"]
-    assert report.session_id in body and "base exit" in body and "regression issue" in body
+    assert report.session_id in body and "-> FAIL" in body and "regression issue" in body
 
     # replaying the same merge event appends nothing
     ev = merge_event(gh, 205, branch="main", sha=f"{5:040x}")
@@ -1157,7 +1144,7 @@ def test_playbook_bodies_keep_the_invariants():
         assert needle in fix, needle
     for needle in (
         "verify/run_all.sh",
-        "MUST FAIL at BASE",
+        "--requirements",
         "result.json",
         "verbatim",
         "probes/",
@@ -1188,11 +1175,10 @@ def test_prompts_carry_playbook_token_or_fall_back_inline(registry):
     assert "requirements/development.txt" not in with_pb and "issue_5/unit" in with_pb
     assert "@playbook:" not in inline and prompts.FIX_PLAYBOOK_BODY in inline
 
-    probes = registry.probes_for([5])
-    with_pb = prompts.verification_prompt(
-        REPO, AUTO, "h" * 40, "b" * 40, "https://x/pr/1", [5], probes, "pb-v"
-    )
-    inline = prompts.verification_prompt(REPO, AUTO, "h" * 40, "b" * 40, "https://x/pr/1", [5], probes)
+    reqs = ["PRD-SQL-1"]
+    probes = [p for _, p in registry.requirement_probes(reqs)]
+    with_pb = prompts.verification_prompt(REPO, AUTO, "h" * 40, "https://x/pr/1", reqs, probes, "pb-v")
+    inline = prompts.verification_prompt(REPO, AUTO, "h" * 40, "https://x/pr/1", reqs, probes)
     assert "@playbook:pb-v" in with_pb and "--head " + "h" * 40 in with_pb and "npm ci" not in with_pb
     assert "@playbook:" not in inline and prompts.VERIFY_PLAYBOOK_BODY in inline
 
@@ -1318,20 +1304,12 @@ def test_collect_guards_prd_requirement_probes_at_head(registry, tmp_path):
             "role": "head",
             "exit_code": 0,
         },
-        {
-            "probe": "prd/health",
-            "issue": 0,
-            "kind": "live_http",
-            "log": str(log),
-            "role": "base",
-            "exit_code": 0,
-        },
     ]
-    out = build_results(rows, set(), set(), {"PRD-OPS-1"}, registry)
+    out = build_results(rows, {"PRD-OPS-1"}, registry)
     assert out[0]["acceptance_met"] is True and out[0]["requirements"] == ["PRD-OPS-1"]
-    assert build_results(rows, set(), set(), set(), registry)[0]["acceptance_met"] is False
+    assert build_results(rows, set(), registry)[0]["acceptance_met"] is False
     rows[0]["exit_code"] = 1
-    assert build_results(rows, set(), set(), {"PRD-OPS-1"}, registry)[0]["acceptance_met"] is False
+    assert build_results(rows, {"PRD-OPS-1"}, registry)[0]["acceptance_met"] is False
     from orchestrator.schema import VERIFICATION_SCHEMA, validate
 
     validate(
@@ -1342,7 +1320,7 @@ def test_collect_guards_prd_requirement_probes_at_head(registry, tmp_path):
             "probe_command": "x",
             "probe_exit_code": 1,
             "evidence": "e",
-            "results": build_results(rows, set(), set(), {"PRD-OPS-1"}, registry),
+            "results": build_results(rows, {"PRD-OPS-1"}, registry),
         },
         VERIFICATION_SCHEMA,
     )
@@ -1359,7 +1337,6 @@ def test_regression_issue_names_the_violated_requirement():
                 "requirements": ["PRD-OPS-1"],
                 "acceptance_met": False,
                 "head_exit_code": 1,
-                "base_exit_code": 0,
                 "evidence": "boom",
             },
             {
@@ -1368,25 +1345,23 @@ def test_regression_issue_names_the_violated_requirement():
                 "requirements": ["PRD-SQL-1"],
                 "acceptance_met": True,
                 "head_exit_code": 0,
-                "base_exit_code": 0,
                 "evidence": "",
             },
         ]
     }
     items = failures(output)
     assert [f.probe for f in items] == ["prd/health"]
-    assert issue_title(27, items) == "Regression on merged PR #27: PRD-OPS-1 violated at HEAD (prd/health)"
+    assert issue_title(27, items) == "PRD violated after PR #27: PRD-OPS-1 (prd/health)"
     body = issue_body(
         target_repo=REPO,
         automation_repo=AUTO,
         pr_url="https://x/pr/27",
         window_prs=[27],
         head_sha="h" * 40,
-        base_sha="b" * 40,
         items=items,
         session_url="https://s",
     )
-    assert "| prd/health | PRD-OPS-1 | - | 0 | 1 |" in body
+    assert "| prd/health | PRD-OPS-1 | 1 |" in body and "BASE" not in body
 
 
 def test_verification_session_guards_every_prd_requirement(registry, world):

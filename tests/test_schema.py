@@ -13,23 +13,20 @@ from orchestrator.schema import (
 )
 
 SHA = "a" * 40
-BASE = "b" * 40
 
 VERIFY_OK: dict[str, Any] = {
     "status": "ok",
     "head_sha": SHA,
-    "base_sha": BASE,
     "acceptance_met": True,
-    "probe_command": "verify/run_all.sh --head a --base b --issues 5",
+    "probe_command": "verify/run_all.sh --head a --requirements PRD-SQL-1",
     "probe_exit_code": 0,
-    "evidence": "issue_5/unit: head=0 base=1 -> PASS",
+    "evidence": "issue_5/unit: head=0 -> PASS",
     "results": [
         {
             "issue": 5,
             "probe": "issue_5/unit",
             "kind": "offline_pytest",
             "head_exit_code": 0,
-            "base_exit_code": 1,
             "acceptance_met": True,
             "evidence": "pytest ok",
         }

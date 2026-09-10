@@ -77,9 +77,10 @@ def outcome_lines(session: dict[str, Any], acus: float | None) -> list[str]:
     if output.get("pr_url"):
         lines.append(f"pull request: {output['pr_url']}")
     for result in output.get("results") or []:
+        reqs = ", ".join(result.get("requirements") or []) or "-"
         lines.append(
-            f"probe `{result['probe']}` (#{result['issue']}): base exit {result['base_exit_code']}, "
-            f"head exit {result['head_exit_code']}"
+            f"probe `{result['probe']}` [{reqs}]: exit {result['head_exit_code']} -> "
+            f"{'PASS' if result.get('acceptance_met') else 'FAIL'}"
         )
     if not output.get("results") and output.get("probe_command"):
         lines.append(
@@ -151,7 +152,6 @@ class VerificationScope:
     trigger_pr: int
     window_prs: list[int]
     head_sha: str
-    base_sha: str | None
 
 
 def verification_scope(session: dict[str, Any], ledger: IssueLedger, window: list[int]) -> VerificationScope:
@@ -165,15 +165,14 @@ def verification_scope(session: dict[str, Any], ledger: IssueLedger, window: lis
     # the trigger is the newest merge of the window, so an untagged session resolves to the same PR
     trigger = triggers[-1] if triggers else max(window)
     output = session.get("structured_output") or {}
-    head, base = str(output.get("head_sha") or ""), output.get("base_sha")
+    head = str(output.get("head_sha") or "")
     window_prs = list(window)
     for entry in find(ledger.read(trigger), "verification_started", session_id=session_id):
         head = str(entry.data.get("head") or head)
-        base = entry.data.get("base") or base
         recorded = entry.data.get("window")
         if recorded:
             window_prs = [int(n) for n in recorded]
-    return VerificationScope(trigger, window_prs, head, base)
+    return VerificationScope(trigger, window_prs, head)
 
 
 def existing_regression_issue(gh: GitHubClient, target_repo: str, session_id: str) -> int | None:
@@ -287,7 +286,6 @@ def remediate(
         pr_url=pr_url,
         window_prs=scope.window_prs,
         head_sha=scope.head_sha,
-        base_sha=scope.base_sha,
         depth=depth,
     )
     ledger.append(
