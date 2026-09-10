@@ -9,6 +9,8 @@ repo and runs `python -m orchestrator ...`. Every decision — which issue gets 
 merged PR gets verified, whether the fix worked — is made by code in this repository and is
 covered by `tests/`.
 
+`SUBMISSION.md` lists the issues remediated on the fork, their fix PRs, and the regressions the loop caught.
+
 ```
 PR merges into master ──► find-and-fix (one invocation, one daemon-style pass)
    1. TESTING: every merge (VERIFY_EVERY_N_MERGES=1; set 5 for every 5th), one verification session on a Devin VM
